@@ -23,6 +23,21 @@
 | DevSecOps      | GitHub Actions, SonarCloud, Snyk, Trivy, gitleaks    |
 | Infrastructure | Docker Compose, Kubernetes (k3s), Nginx, Let's Encrypt |
 
+## Running the services
+
+```bash
+cp .env.example .env          # then replace every value (openssl rand -base64 24)
+docker compose up -d
+docker compose ps             # all three must be "healthy"
+```
+
+PostgreSQL (application database + Keycloak's own, isolated, database), Redis
+(BFF sessions) and Keycloak. Only Keycloak and PostgreSQL publish a port, bound
+to `127.0.0.1` so nothing is reachable from the local network. Keycloak's admin
+console: <http://localhost:8080>.
+
+`docker compose down` keeps the data, `docker compose down -v` deletes it.
+
 ## Running the backend
 
 ```bash

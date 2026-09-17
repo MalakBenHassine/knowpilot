@@ -1,0 +1,87 @@
+# Local development stack.
+# The application itself runs on the host (uv / npm) for instant reload; this
+# file provides the services it depends on.
+#
+#   docker compose up -d        start
+#   docker compose ps           check health
+#   docker compose down         stop, KEEP the data
+#   docker compose down -v      stop and DELETE the data
+
+name: knowpilot
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: ${KP_POSTGRES_USER:?KP_POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${KP_POSTGRES_PASSWORD:?KP_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${KP_POSTGRES_DB:?KP_POSTGRES_DB is required}
+      # Consumed by the init script, which creates Keycloak's own database.
+      KP_KEYCLOAK_DB: ${KP_KEYCLOAK_DB:?KP_KEYCLOAK_DB is required}
+      KP_KEYCLOAK_DB_USER: ${KP_KEYCLOAK_DB_USER:?KP_KEYCLOAK_DB_USER is required}
+      KP_KEYCLOAK_DB_PASSWORD: ${KP_KEYCLOAK_DB_PASSWORD:?KP_KEYCLOAK_DB_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Runs once, on an empty data directory only.
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      # 127.0.0.1 only: without it Docker publishes on every interface,
+      # exposing the database to the whole local network.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.8.2-alpine
+    # No published port: only the backend talks to it, over the Docker network.
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.4
+    # start-dev is for LOCAL ONLY: it disables HTTPS requirements and hostname
+    # checks. Production uses `start --optimized` behind the reverse proxy.
+    command: ["start-dev", "--health-enabled=true"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KP_KEYCLOAK_ADMIN:?KP_KEYCLOAK_ADMIN is required}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KP_KEYCLOAK_ADMIN_PASSWORD:?KP_KEYCLOAK_ADMIN_PASSWORD is required}
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: ${KP_KEYCLOAK_DB}
+      KC_DB_USERNAME: ${KP_KEYCLOAK_DB_USER}
+      KC_DB_PASSWORD: ${KP_KEYCLOAK_DB_PASSWORD}
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        # Not "started": Postgres accepts connections a few seconds later.
+        condition: service_healthy
+    healthcheck:
+      # The image has no curl: this opens a TCP socket from bash instead.
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/9000; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '\"status\": \"UP\"' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
