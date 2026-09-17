@@ -23,6 +23,22 @@
 | DevSecOps      | GitHub Actions, SonarCloud, Snyk, Trivy, gitleaks    |
 | Infrastructure | Docker Compose, Kubernetes (k3s), Nginx, Let's Encrypt |
 
+## Running the backend
+
+```bash
+cd backend
+uv sync
+uv run uvicorn app.main:app --reload --port 8000
+```
+
+- `GET /api/health/live` — liveness: is the process alive? Checks nothing else.
+- `GET /api/health/ready` — readiness: are the dependencies reachable? Returns
+  `503` when one is not, so an orchestrator stops sending traffic instead of
+  restarting the container.
+- Interactive docs at `/api/docs`, disabled when `KP_ENVIRONMENT=production`.
+
+The API contract lives in [docs/api/contract.md](docs/api/contract.md).
+
 ## Running the frontend
 
 ```bash

@@ -12,6 +12,29 @@ repos:
         language: system
         pass_filenames: false
 
+  # Qualité du code Python (backend). Les outils viennent de l'environnement uv
+  # du backend : même version en local et en CI.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint Python)
+        entry: bash -c 'cd backend && uv run ruff check .'
+        language: system
+        pass_filenames: false
+        files: ^backend/.*\.py$
+      - id: ruff-format
+        name: ruff (format Python)
+        entry: bash -c 'cd backend && uv run ruff format --check .'
+        language: system
+        pass_filenames: false
+        files: ^backend/.*\.py$
+      - id: mypy
+        name: mypy (typage strict)
+        entry: bash -c 'cd backend && uv run mypy app'
+        language: system
+        pass_filenames: false
+        files: ^backend/.*\.py$
+
   # Garde-fous génériques maintenus par l'équipe pre-commit.
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
