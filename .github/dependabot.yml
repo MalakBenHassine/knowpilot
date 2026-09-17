@@ -1,0 +1,35 @@
+version: 2
+
+# Dependabot opens a pull request when a dependency has a newer version, and
+# immediately when it has a known vulnerability. Pinned versions stay safe
+# without staying frozen: YOU decide when to merge, and the CI validates it.
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One pull request for all minor and patch bumps instead of ten.
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # The actions themselves are code we execute: they must stay up to date too.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
