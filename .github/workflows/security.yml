@@ -1,0 +1,62 @@
+name: Security
+
+# Security checks run on EVERY change, not only on the code they touch:
+# a secret can be committed in any file.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Weekly run: a dependency that is safe today can become vulnerable tomorrow,
+  # even if nobody pushes any code.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history: a secret removed in a later commit is still
+          # exposed in the commit that introduced it.
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  vulnerabilities:
+    name: Dependencies and IaC
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Scans the lock files (npm, uv) for known vulnerabilities.
+      - name: Trivy - dependencies
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true # a vulnerability with no patch cannot be fixed by us
+          exit-code: "1" # blocks the pull request
+
+      # Scans docker-compose.yml and later the Dockerfiles and Kubernetes
+      # manifests for insecure configuration.
+      - name: Trivy - configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          severity: HIGH,CRITICAL
+          exit-code: "1"
