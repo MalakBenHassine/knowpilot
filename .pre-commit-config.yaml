@@ -22,5 +22,7 @@ repos:
       - id: check-merge-conflict
       - id: check-yaml
       - id: check-json
+        # Les fichiers tsconfig sont du JSONC (JSON avec commentaires) : exclus.
+        exclude: ^frontend/tsconfig.*\.json$
       - id: end-of-file-fixer
       - id: trailing-whitespace
