@@ -15,10 +15,28 @@
 
 | Layer          | Technology                                           |
 | -------------- | ---------------------------------------------------- |
-| Frontend       | React, TypeScript, Vite                              |
+| Frontend       | React, TypeScript, Vite, Tailwind CSS                |
 | Backend        | FastAPI (Python 3.12)                                |
 | Authentication | Keycloak (OpenID Connect), Backend-for-Frontend      |
 | RAG            | BGE-M3 embeddings, Chroma, Groq LLM                  |
 | Data           | PostgreSQL, Redis                                    |
 | DevSecOps      | GitHub Actions, SonarCloud, Snyk, Trivy, gitleaks    |
 | Infrastructure | Docker Compose, Kubernetes (k3s), Nginx, Let's Encrypt |
+
+## Running the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev     # http://localhost:5173
+```
+
+The API does not exist yet, so the UI runs against an **in-memory mock backend**
+that implements the documented contract (`VITE_API_MODE=mock`, the default).
+Switching to the real API is a single environment variable — no component or
+hook knows the difference.
+
+The interface models the four outcomes of a question explicitly: **loading**
+(retrieving, then generating), **answered with sources**, **insufficient
+evidence**, and **error**. "Insufficient evidence" is a valid answer, not a
+failure, and is styled accordingly.
