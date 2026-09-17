@@ -13,8 +13,10 @@ logs/
 # === Frontend (Node / Vite) ===
 node_modules/
 dist/
+dist-ssr/
 coverage/
 *.tsbuildinfo
+*.local
 
 # === Backend (Python) ===
 .venv/
