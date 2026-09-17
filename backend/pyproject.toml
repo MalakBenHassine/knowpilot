@@ -1,0 +1,44 @@
+[project]
+name = "knowpilot-backend"
+version = "0.1.0"
+description = "KnowPilot API: authentication (BFF), document ingestion and grounded answers."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi[standard]>=0.141.1",
+    "pydantic-settings>=2.15.0",
+]
+
+# The application ships as a container and is never published to an index:
+# there is no package to build.
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F style and errors, I import order, B bugbear, UP modern syntax,
+# S security (bandit), ASYNC async pitfalls.
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is the whole point of a test file.
+"tests/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.0",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
