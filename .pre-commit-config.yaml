@@ -1,0 +1,26 @@
+# Hooks exécutés automatiquement avant chaque commit.
+# Installation locale (une fois par clone) : pre-commit install
+# Exécution manuelle sur tout le dépôt      : pre-commit run --all-files
+
+repos:
+  # Détection de secrets : la protection la plus importante sur un dépôt public.
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (détection de secrets)
+        entry: gitleaks git --pre-commit --staged --redact --verbose
+        language: system
+        pass_filenames: false
+
+  # Garde-fous génériques maintenus par l'équipe pre-commit.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
