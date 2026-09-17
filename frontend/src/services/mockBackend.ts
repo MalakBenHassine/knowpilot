@@ -1,11 +1,12 @@
 /**
- * In-memory fake backend, used while the FastAPI service does not exist yet.
- * It implements EXACTLY the documented contract (same shapes, same states,
- * same failure modes), so switching to the real API is a one-line change in
- * the service modules — no component or hook is aware of it.
+ * In-memory fake backend, used while the FastAPI service is being built.
+ *
+ * It answers with the WIRE FORMAT of docs/api/contract.md (snake_case, `items`
+ * envelope, `null` for absent values), so the real parsing and mapping code
+ * runs in mock mode too. Switching to the real API exercises no new code path.
  */
+import type { DocumentDto, ListDto } from './dto'
 import type { AnswerPayload } from '../types/chat'
-import type { StoredDocument } from '../types/document'
 import type { User } from '../types/auth'
 
 const MOCK_USER: User = {
@@ -14,8 +15,10 @@ const MOCK_USER: User = {
   displayName: 'Malak Ben Hassine',
 }
 
+const STAGES = ['parsing', 'chunking', 'embedding', 'indexing'] as const
+
 let signedIn = false
-let documents: StoredDocument[] = []
+let documents: DocumentDto[] = []
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -38,26 +41,28 @@ export const mockBackend = {
     signedIn = false
   },
 
-  async listDocuments(): Promise<StoredDocument[]> {
+  async listDocuments(): Promise<ListDto<DocumentDto>> {
     await delay(300)
-    return documents.map((document) => ({ ...document }))
+    return { items: documents.map((document) => ({ ...document })) }
   },
 
-  /** Accepts the file and starts a simulated indexing pipeline. */
-  async upload(file: File): Promise<StoredDocument> {
+  async upload(file: File): Promise<DocumentDto> {
     await delay(500)
-    const id = crypto.randomUUID()
-    const created: StoredDocument = {
-      id,
+    const created: DocumentDto = {
+      id: crypto.randomUUID(),
       filename: file.name,
-      mimeType: file.type || 'application/octet-stream',
-      sizeBytes: file.size,
+      mime_type: file.type || 'application/octet-stream',
+      size_bytes: file.size,
       status: 'processing',
-      progress: 0,
-      createdAt: new Date().toISOString(),
+      stage: 'parsing',
+      page_count: null,
+      chunk_count: null,
+      failure_reason: null,
+      retryable: false,
+      created_at: new Date().toISOString(),
     }
     documents = [created, ...documents]
-    void simulateIndexing(id, file)
+    void simulateIndexing(created.id, file)
     return { ...created }
   },
 
@@ -71,8 +76,8 @@ export const mockBackend = {
     const document = documents.find((candidate) => candidate.id === id)
     if (!document) return
     document.status = 'processing'
-    document.progress = 0
-    delete document.failureReason
+    document.stage = 'parsing'
+    document.failure_reason = null
     void simulateIndexing(id)
   },
 
@@ -80,13 +85,13 @@ export const mockBackend = {
     const readyDocuments = documents.filter((document) => document.status === 'ready')
     await delay(900)
 
-    // A question about documents we do not have must NOT be answered.
+    // A question we have no evidence for must NOT be answered.
     if (readyDocuments.length === 0 || question.trim().length < 12) {
       await delay(400)
       return { outcome: 'insufficient_evidence' }
     }
 
-    // Deliberate failure hook, so the error state can be demonstrated.
+    // Deliberate failure hook, so the error state can be exercised.
     if (question.toLowerCase().includes('fail')) {
       throw new Error('mock backend failure')
     }
@@ -109,7 +114,7 @@ export const mockBackend = {
           id: crypto.randomUUID(),
           documentId: primary?.id ?? 'unknown',
           filename: primary?.filename ?? 'document.pdf',
-          page: primary?.mimeType === 'application/pdf' ? 3 : undefined,
+          page: primary?.mime_type === 'application/pdf' ? 3 : undefined,
           snippet:
             'The termination period is thirty (30) days from the date of written notice, unless otherwise agreed by both parties.',
           score: 0.82,
@@ -120,7 +125,7 @@ export const mockBackend = {
                 id: crypto.randomUUID(),
                 documentId: secondary.id,
                 filename: secondary.filename,
-                page: secondary.mimeType === 'application/pdf' ? 1 : undefined,
+                page: secondary.mime_type === 'application/pdf' ? 1 : undefined,
                 snippet:
                   'Notices must be delivered in writing and are considered received on the next business day.',
                 score: 0.64,
@@ -132,28 +137,29 @@ export const mockBackend = {
   },
 }
 
-/** Moves a document through processing -> ready | failed, updating progress. */
+/** Walks a document through the real pipeline stages, then ready | failed. */
 async function simulateIndexing(id: string, file?: File): Promise<void> {
-  for (let progress = 10; progress <= 100; progress += 15) {
-    await delay(700)
+  for (const stage of STAGES) {
+    await delay(1200)
     const document = documents.find((candidate) => candidate.id === id)
     if (!document) return
-    document.progress = Math.min(progress, 100)
+    document.stage = stage
   }
 
   const document = documents.find((candidate) => candidate.id === id)
   if (!document) return
 
-  // An empty file is the classic "PDF with no extractable text" case.
+  // An empty file stands for the classic "PDF with no extractable text".
   if (file && file.size === 0) {
     document.status = 'failed'
-    document.failureReason = 'no_text_found'
-    delete document.progress
+    document.stage = null
+    document.failure_reason = 'no_text_found'
+    document.retryable = false // permanent: retrying would fail again
     return
   }
 
   document.status = 'ready'
-  document.pageCount = document.mimeType === 'application/pdf' ? 12 : undefined
-  document.chunkCount = 24
-  delete document.progress
+  document.stage = null
+  document.page_count = document.mime_type === 'application/pdf' ? 12 : null
+  document.chunk_count = 24
 }

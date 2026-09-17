@@ -1,6 +1,10 @@
 import { Check, FileText, RotateCcw, Trash2, TriangleAlert } from 'lucide-react'
 import { formatBytes, formatKind, formatRelativeTime } from '../../lib/format'
-import type { DocumentFailureReason, StoredDocument } from '../../types/document'
+import type {
+  DocumentFailureReason,
+  IngestionStage,
+  StoredDocument,
+} from '../../types/document'
 import { Badge } from '../ui/Badge'
 import { Button } from '../ui/Button'
 import { Card } from '../ui/Card'
@@ -15,6 +19,14 @@ const FAILURE_MESSAGES: Record<DocumentFailureReason, string> = {
   processing_error: 'Unable to process this document.',
 }
 
+/** The real pipeline steps, so the UI mirrors what the system is doing. */
+const STAGE_LABELS: Record<IngestionStage, string> = {
+  parsing: 'Extracting text…',
+  chunking: 'Splitting into passages…',
+  embedding: 'Computing embeddings…',
+  indexing: 'Building the search index…',
+}
+
 export function DocumentCard({
   document,
   onRetry,
@@ -25,9 +37,10 @@ export function DocumentCard({
   onRemove: (id: string) => void
 }) {
   const { status } = document
+  const isWorking = status === 'uploading' || status === 'processing'
 
   return (
-    <Card className="p-4 animate-rise">
+    <Card className="group p-4 animate-rise">
       <div className="flex items-start gap-3">
         <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-md bg-surface-sunken text-ink-subtle">
           <FileText size={17} />
@@ -51,21 +64,19 @@ export function DocumentCard({
           </p>
 
           <div className="mt-3">
-            {status === 'uploading' || status === 'processing' ? (
+            {isWorking ? (
               <div className="space-y-2">
                 <p className="flex items-center gap-2 text-caption text-ink-muted">
                   <Spinner size={12} />
-                  {status === 'uploading' ? 'Uploading file…' : 'Indexing document…'}
+                  {status === 'uploading'
+                    ? 'Uploading file…'
+                    : document.stage
+                      ? STAGE_LABELS[document.stage]
+                      : 'Indexing document…'}
                 </p>
-                <ProgressBar
-                  value={document.progress}
-                  label={status === 'uploading' ? 'Upload progress' : 'Indexing progress'}
-                />
-                {status === 'processing' ? (
-                  <p className="text-caption text-ink-subtle">
-                    Extracting text, splitting it into passages and building the search index.
-                  </p>
-                ) : null}
+                {/* Indeterminate: the backend reports a STAGE, not a percentage,
+                    and a fake progress bar would misrepresent the system. */}
+                <ProgressBar label="Indexing progress" />
               </div>
             ) : null}
 
@@ -82,10 +93,14 @@ export function DocumentCard({
                   {FAILURE_MESSAGES[document.failureReason ?? 'processing_error']}
                 </p>
                 <div className="flex gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => onRetry(document.id)}>
-                    <RotateCcw size={13} />
-                    Try again
-                  </Button>
+                  {/* "Try again" appears only when the backend says retrying can
+                      succeed. A button that always fails destroys trust. */}
+                  {document.retryable ? (
+                    <Button size="sm" variant="secondary" onClick={() => onRetry(document.id)}>
+                      <RotateCcw size={13} />
+                      Try again
+                    </Button>
+                  ) : null}
                   <Button size="sm" variant="danger" onClick={() => onRemove(document.id)}>
                     <Trash2 size={13} />
                     Remove
@@ -101,7 +116,7 @@ export function DocumentCard({
             type="button"
             onClick={() => onRemove(document.id)}
             aria-label={`Remove ${document.filename}`}
-            className="rounded-sm p-2 text-ink-subtle opacity-0 transition-opacity duration-150 hover:bg-surface-sunken hover:text-danger focus-visible:opacity-100 group-hover:opacity-100 sm:opacity-100"
+            className="rounded-sm p-2 text-ink-subtle transition-opacity duration-150 hover:bg-surface-sunken hover:text-danger sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
           >
             <Trash2 size={15} />
           </button>

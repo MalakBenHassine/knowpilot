@@ -66,7 +66,7 @@ export function useDocuments() {
         mimeType: file.type || 'application/octet-stream',
         sizeBytes: file.size,
         status: 'uploading',
-        progress: 0,
+        retryable: false,
         createdAt: new Date().toISOString(),
       }
       setState((previous) => ({ ...previous, documents: [optimistic, ...previous.documents] }))
