@@ -52,7 +52,9 @@ uv run uvicorn app.main:app --reload --port 8000
   restarting the container.
 - Interactive docs at `/api/docs`, disabled when `KP_ENVIRONMENT=production`.
 
-The API contract lives in [docs/api/contract.md](docs/api/contract.md).
+The API contract lives in [docs/api/contract.md](docs/api/contract.md), and the
+reasoning behind the main technical choices in
+[docs/adr/](docs/adr/README.md).
 
 ## Running the frontend
 
