@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -33,6 +34,15 @@ class Settings(BaseSettings):
     # Where the browser is sent back after login and logout.
     frontend_url: str = "http://localhost:5173"
 
+    # --- PostgreSQL ---
+    # Split into parts rather than one URL: the same values already feed the
+    # Docker Compose service, so a single source avoids the two drifting apart.
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_user: str = "knowpilot"
+    postgres_password: str = ""
+    postgres_db: str = "knowpilot"
+
     # --- Embeddings (ADR-0006) ---
     # The name is part of the data contract with the vector index: changing it
     # invalidates every vector ever written, so it must be configuration, not a
@@ -47,6 +57,21 @@ class Settings(BaseSettings):
     # Named `embedding_cache_dir`, not `model_cache_dir`: pydantic reserves the
     # `model_` prefix for its own API and would warn about the collision.
     embedding_cache_dir: str | None = None
+
+    @property
+    def database_url(self) -> str:
+        """The asyncpg URL, built from the parts.
+
+        The password is percent-encoded: a perfectly valid password containing
+        an at sign or a slash would otherwise be parsed as part of the host,
+        and the failure would look like a network problem rather than a
+        quoting one.
+        """
+        password = quote_plus(self.postgres_password)
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
 
     @property
     def cookie_secure(self) -> bool:

@@ -11,7 +11,12 @@ name: knowpilot
 
 services:
   postgres:
-    image: postgres:17.11-alpine
+    # The official Postgres image with pgvector already compiled in. Vectors
+    # live in the same database as the documents they belong to, so deleting a
+    # document deletes its vectors in the same transaction - no second data
+    # store to keep in sync, and no orphaned vectors to answer questions with.
+    # Debian-based rather than Alpine: pgvector publishes no Alpine variant.
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: ${KP_POSTGRES_USER:?KP_POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${KP_POSTGRES_PASSWORD:?KP_POSTGRES_PASSWORD is required}
