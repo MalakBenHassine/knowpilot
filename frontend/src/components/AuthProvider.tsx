@@ -9,24 +9,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true
-    void fetchSession().then((user) => {
-      if (!active) return
-      setSession(user ? { status: 'authenticated', user } : { status: 'anonymous' })
-    })
+    void fetchSession()
+      .then((user) => {
+        if (!active) return
+        setSession(user ? { status: 'authenticated', user } : { status: 'anonymous' })
+      })
+      .catch(() => {
+        // The API is unreachable: treat it as anonymous rather than hanging on
+        // a spinner forever.
+        if (active) setSession({ status: 'anonymous' })
+      })
     return () => {
       active = false
     }
   }, [])
 
-  const signIn = useCallback(async () => {
-    const user = await startLogin()
-    if (user) setSession({ status: 'authenticated', user })
-  }, [])
-
-  const signOut = useCallback(async () => {
-    await logout()
-    setSession({ status: 'anonymous' })
-  }, [])
+  // Both actions leave the page: the browser follows a redirect, so there is
+  // no state to update afterwards.
+  const signIn = useCallback(async () => startLogin(), [])
+  const signOut = useCallback(async () => logout(), [])
 
   const value = useMemo(() => ({ session, signIn, signOut }), [session, signIn, signOut])
 

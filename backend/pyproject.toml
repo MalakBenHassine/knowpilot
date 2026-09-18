@@ -5,7 +5,9 @@ description = "KnowPilot API: authentication (BFF), document ingestion and groun
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi[standard]>=0.141.1",
+    "joserfc>=1.7.5",
     "pydantic-settings>=2.15.0",
+    "redis>=6",
 ]
 
 # The application ships as a container and is never published to an index:
@@ -23,8 +25,9 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
 
 [tool.ruff.lint.per-file-ignores]
-# assert is the whole point of a test file.
-"tests/*" = ["S101"]
+# S101: assert is the whole point of a test file.
+# S105: fake tokens in fixtures are not hardcoded credentials.
+"tests/*" = ["S101", "S105"]
 
 [tool.mypy]
 python_version = "3.12"

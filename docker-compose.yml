@@ -38,8 +38,12 @@ services:
 
   redis:
     image: redis:8.8.2-alpine
-    # No published port: only the backend talks to it, over the Docker network.
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      # Published for LOCAL DEVELOPMENT ONLY, and on 127.0.0.1 only: the API
+      # runs on the host with hot reload. In production the API is a container
+      # on this network and Redis publishes nothing at all.
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:

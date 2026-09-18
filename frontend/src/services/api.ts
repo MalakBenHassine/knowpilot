@@ -27,6 +27,17 @@ function kindFromStatus(status: number): ChatErrorKind {
   return 'server'
 }
 
+/**
+ * CSRF token for the current session. Kept in memory on purpose: storing it in
+ * localStorage would hand it to any XSS, which is exactly what it defends
+ * against. It is re-read from GET /auth/me on every page load.
+ */
+let csrfToken: string | null = null
+
+export function setCsrfToken(token: string | null): void {
+  csrfToken = token
+}
+
 export interface RequestOptions {
   method?: 'GET' | 'POST' | 'DELETE'
   body?: BodyInit
@@ -37,6 +48,11 @@ export interface RequestOptions {
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, headers = {}, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+
+  // Safe methods never change state, so they need no CSRF token.
+  if (method !== 'GET' && csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken
+  }
   const timeout = AbortSignal.timeout(timeoutMs)
   const abortSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
 
