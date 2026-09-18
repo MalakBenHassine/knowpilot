@@ -11,7 +11,7 @@ name: knowpilot
 
 services:
   postgres:
-    image: postgres:17.11-alpine
+    image: postgres:18.6-alpine
     environment:
       POSTGRES_USER: ${KP_POSTGRES_USER:?KP_POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${KP_POSTGRES_PASSWORD:?KP_POSTGRES_PASSWORD is required}
