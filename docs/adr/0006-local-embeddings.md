@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-17
+- **Note:** the sentence about Chroma below is superseded by [ADR-0011](0011-pgvector-instead-of-a-separate-vector-store.md). The model choice itself still stands.
 
 ## Context
 

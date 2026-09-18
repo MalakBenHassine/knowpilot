@@ -1,15 +1,47 @@
-"""Shared dependencies: session lookup, authentication and CSRF."""
+"""Shared dependencies: session lookup, authentication, CSRF and database."""
 
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.session import SessionData, SessionStore
+from app.core.storage import FileStorage
 
 
 def get_session_store(request: Request) -> SessionStore:
     store: SessionStore = request.app.state.session_store
     return store
+
+
+def get_file_storage(request: Request) -> FileStorage:
+    storage: FileStorage = request.app.state.file_storage
+    return storage
+
+
+Storage = Annotated[FileStorage, Depends(get_file_storage)]
+
+
+async def db_session(request: Request) -> AsyncIterator[AsyncSession]:
+    """One database session per request, committed only if the handler returns.
+
+    The commit happens here rather than inside the repository functions, so a
+    handler that writes several tables either succeeds entirely or leaves
+    nothing behind. An exception on the way out rolls everything back before
+    the error response is built.
+    """
+    factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
+    async with factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+Db = Annotated[AsyncSession, Depends(db_session)]
 
 
 async def current_session(

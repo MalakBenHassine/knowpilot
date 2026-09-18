@@ -19,6 +19,7 @@ decisions is as useful as the decisions themselves.
 | [0008](0008-contract-first-with-a-mock-backend.md) | Contract-first UI against a mock backend | Accepted |
 | [0009](0009-no-state-management-library.md) | No state management library for now | Accepted |
 | [0010](0010-ocr-as-a-fallback.md) | OCR is a fallback, not a systematic step | Accepted |
+| [0011](0011-pgvector-instead-of-a-separate-vector-store.md) | pgvector in the application database, not a separate vector store | Accepted |
 
 ## Template
 
