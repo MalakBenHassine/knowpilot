@@ -2,6 +2,7 @@ import { LockKeyhole } from 'lucide-react'
 import { useState } from 'react'
 import { Navigate } from 'react-router'
 import { useAuth } from '../hooks/auth-context'
+import { startRegistration } from '../services/auth'
 import { Button } from '../components/ui/Button'
 import { Logo } from '../components/ui/Logo'
 import { ThemeToggle } from '../components/ThemeToggle'
@@ -47,6 +48,17 @@ export function LoginPage() {
           >
             Continue with Keycloak
           </Button>
+
+          <p className="mt-4 text-center text-caption text-ink-muted">
+            New here?{' '}
+            <button
+              type="button"
+              onClick={startRegistration}
+              className="font-medium text-accent underline underline-offset-2 hover:text-accent-hover"
+            >
+              Create an account
+            </button>
+          </p>
 
           <p className="mt-6 flex items-center justify-center gap-2 text-caption text-ink-subtle">
             <LockKeyhole size={13} />

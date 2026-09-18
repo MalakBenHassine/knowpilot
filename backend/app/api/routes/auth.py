@@ -49,12 +49,14 @@ def _set_cookie(
     )
 
 
-@router.get("/login", summary="Start the OIDC login")
-async def login(
-    store: Annotated[SessionStore, Depends(get_session_store)],
-    oidc: Annotated[OidcClient, Depends(get_oidc)],
-    settings: Annotated[Settings, Depends(get_settings)],
+async def _start_oidc_flow(
+    store: SessionStore,
+    oidc: OidcClient,
+    settings: Settings,
+    *,
+    register: bool,
 ) -> RedirectResponse:
+    """Login and sign-up share one flow; only the first Keycloak page differs."""
     state = new_token(16)
     nonce = new_token(16)
     code_verifier = new_token(48)
@@ -63,11 +65,37 @@ async def login(
     tx_id = await store.start_login(
         LoginTransaction(state=state, nonce=nonce, code_verifier=code_verifier)
     )
-    url = await oidc.authorization_url(state, nonce, pkce_challenge(code_verifier))
+    url = await oidc.authorization_url(
+        state, nonce, pkce_challenge(code_verifier), register=register
+    )
 
     response = RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
     _set_cookie(response, LOGIN_TX_COOKIE, tx_id, 300, settings)
     return response
+
+
+@router.get("/login", summary="Start the OIDC login")
+async def login(
+    store: Annotated[SessionStore, Depends(get_session_store)],
+    oidc: Annotated[OidcClient, Depends(get_oidc)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> RedirectResponse:
+    return await _start_oidc_flow(store, oidc, settings, register=False)
+
+
+@router.get("/register", summary="Start the sign-up")
+async def register(
+    store: Annotated[SessionStore, Depends(get_session_store)],
+    oidc: Annotated[OidcClient, Depends(get_oidc)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> RedirectResponse:
+    """Sends the browser to Keycloak's registration form.
+
+    Account creation, password policy and duplicate checks are Keycloak's job:
+    the application writes no sign-up code at all. A successful registration
+    ends on the same callback as a login, already authenticated.
+    """
+    return await _start_oidc_flow(store, oidc, settings, register=True)
 
 
 @router.get("/callback", summary="Finish the OIDC login")

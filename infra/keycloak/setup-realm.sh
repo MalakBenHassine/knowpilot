@@ -28,20 +28,35 @@ $KC config credentials \
     --user "$KP_KEYCLOAK_ADMIN" \
     --password "$KP_KEYCLOAK_ADMIN_PASSWORD" >/dev/null
 
+### Realm settings, applied whether the realm is new or not, so this script
+### stays the single source of truth for the configuration.
+REALM_ARGS=(
+    -s enabled=true
+    -s displayName="KnowPilot"
+    # Self-service sign-up. Keycloak provides the whole registration flow:
+    # form, password policy, duplicate checks. We write no code for it.
+    -s registrationAllowed=true
+    -s registrationEmailAsUsername=true
+    # TODO before the public deployment: set verifyEmail=true once SMTP is
+    # configured, and add per-user quotas. Without them, anyone could consume
+    # the free LLM quota and the disk.
+    -s verifyEmail=false
+    -s resetPasswordAllowed=true
+    -s loginWithEmailAllowed=true
+    # Temporary lockout after repeated failures: hashing only slows an
+    # attacker down offline, not against the live login form.
+    -s bruteForceProtected=true
+    -s "passwordPolicy=length(12) and notUsername(undefined) and passwordHistory(3)"
+    -s ssoSessionIdleTimeout=1800
+    -s ssoSessionMaxLifespan=28800
+)
+
 echo "==> Realm '$REALM'"
 if $KC get "realms/$REALM" >/dev/null 2>&1; then
-    echo "    already exists"
+    $KC update "realms/$REALM" "${REALM_ARGS[@]}" >/dev/null
+    echo "    updated"
 else
-    $KC create realms \
-        -s "realm=$REALM" \
-        -s enabled=true \
-        -s displayName="KnowPilot" \
-        -s registrationAllowed=false \
-        -s loginWithEmailAllowed=true \
-        -s bruteForceProtected=true \
-        -s "passwordPolicy=length(12) and notUsername(undefined) and passwordHistory(3)" \
-        -s ssoSessionIdleTimeout=1800 \
-        -s ssoSessionMaxLifespan=28800 >/dev/null
+    $KC create realms -s "realm=$REALM" "${REALM_ARGS[@]}" >/dev/null
     echo "    created"
 fi
 
@@ -77,8 +92,13 @@ else
 fi
 
 echo "==> Client secret"
-$KC create "clients/$CLIENT_UUID/client-secret" -r "$REALM" >/dev/null 2>&1 || true
+# Only READ the secret. Regenerating it on every run would silently break the
+# value already stored in .env - idempotence matters for setup scripts.
 SECRET=$($KC get "clients/$CLIENT_UUID/client-secret" -r "$REALM" --fields value --format csv --noquotes | tr -d '\r')
+if [[ -z "$SECRET" ]]; then
+    $KC create "clients/$CLIENT_UUID/client-secret" -r "$REALM" >/dev/null
+    SECRET=$($KC get "clients/$CLIENT_UUID/client-secret" -r "$REALM" --fields value --format csv --noquotes | tr -d '\r')
+fi
 
 echo "==> Development user"
 if [[ -n "${KP_DEV_USER_PASSWORD:-}" ]]; then
@@ -93,8 +113,14 @@ if [[ -n "${KP_DEV_USER_PASSWORD:-}" ]]; then
             -s lastName="Ben Hassine" >/dev/null
         USER_ID=$($KC get users -r "$REALM" -q "username=malak" --fields id --format csv --noquotes | tr -d '\r')
     fi
-    $KC set-password -r "$REALM" --userid "$USER_ID" --new-password "$KP_DEV_USER_PASSWORD" >/dev/null
-    echo "    user 'malak' ready"
+    # The realm forbids reusing the last three passwords, so re-running the
+    # script with an unchanged value fails here. That is the policy working,
+    # not a bug: keep going.
+    if $KC set-password -r "$REALM" --userid "$USER_ID" --new-password "$KP_DEV_USER_PASSWORD" >/dev/null 2>&1; then
+        echo "    user 'malak' ready"
+    else
+        echo "    user 'malak' exists; password unchanged (password history policy)"
+    fi
 else
     echo "    skipped (KP_DEV_USER_PASSWORD not set)"
 fi

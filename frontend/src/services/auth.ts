@@ -41,6 +41,14 @@ export function startLogin(): void {
 }
 
 /**
+ * Same OIDC flow, but Keycloak shows its registration form first. A successful
+ * sign-up comes back authenticated, so there is no second login step.
+ */
+export function startRegistration(): void {
+  window.location.assign('/api/auth/register')
+}
+
+/**
  * Ends our session server side, then sends the browser to Keycloak so the
  * identity provider session ends too. Without the second step, clicking
  * "sign in" again would log straight back in.
