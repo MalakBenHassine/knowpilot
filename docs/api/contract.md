@@ -67,6 +67,36 @@ Responses must not be cached: a cached health state is a lie.
 
 ---
 
+## Authentication
+
+The backend is the OIDC client (Backend-for-Frontend, ADR-0004). `login` and
+`callback` are reached by **browser redirects**, not by `fetch`: the user must
+see Keycloak's page and the application never handles a password.
+
+| Endpoint | Called by | Result |
+| -------- | --------- | ------ |
+| `GET /api/auth/login` | Browser redirect | `303` to Keycloak, with `state`, `nonce` and a PKCE challenge; sets a five-minute `__Host-oidc-tx` cookie |
+| `GET /api/auth/callback` | Keycloak redirect | Verifies `state`, exchanges the code server side, validates the id token (issuer, audience, expiry, nonce), creates the session, sets `__Host-session`, then `303` to `/documents`. Any failure redirects to `/login?error=auth` |
+| `GET /api/auth/me` | `fetch` | `200` with the user, or `401` when there is no session |
+| `POST /api/auth/logout` | `fetch` | Requires the CSRF header. Deletes the session and returns the URL that ends the Keycloak session |
+
+```json
+// GET /api/auth/me
+{
+  "id": "8f2c1e40-…",          // the `sub` claim: stable, unlike an email
+  "email": "malak@knowpilot.dev",
+  "display_name": "Malak Ben Hassine",
+  "csrf_token": "…"            // sent back as X-CSRF-Token on writes
+}
+```
+
+The session cookie holds a **random identifier only**. Tokens live in Redis with
+two independent lifetimes: a sliding idle timeout and a hard absolute limit.
+
+**CSRF:** every request that changes state (`POST`, `PUT`, `PATCH`, `DELETE`)
+must carry `X-CSRF-Token`. Safe methods are exempt, which is only sound because
+a `GET` never changes state.
+
 ## Documents
 
 ### `GET /api/documents`
