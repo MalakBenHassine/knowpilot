@@ -18,6 +18,7 @@ decisions is as useful as the decisions themselves.
 | [0007](0007-tailwind-and-own-design-system.md) | Tailwind CSS with our own design system | Accepted |
 | [0008](0008-contract-first-with-a-mock-backend.md) | Contract-first UI against a mock backend | Accepted |
 | [0009](0009-no-state-management-library.md) | No state management library for now | Accepted |
+| [0010](0010-ocr-as-a-fallback.md) | OCR is a fallback, not a systematic step | Accepted |
 
 ## Template
 
