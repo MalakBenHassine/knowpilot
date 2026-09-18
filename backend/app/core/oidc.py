@@ -51,7 +51,15 @@ class OidcClient:
         self._metadata_fetched_at = time.time()
         return self._metadata
 
-    async def authorization_url(self, state: str, nonce: str, code_challenge: str) -> str:
+    async def authorization_url(
+        self, state: str, nonce: str, code_challenge: str, *, register: bool = False
+    ) -> str:
+        """Builds the login URL, or the sign-up one.
+
+        Registration is the SAME OIDC flow: Keycloak simply opens its
+        registration form first, then returns an authorization code exactly as
+        a login would. Nothing else changes, here or in the callback.
+        """
         metadata = await self.metadata()
         query = urlencode(
             {
@@ -65,7 +73,12 @@ class OidcClient:
                 "code_challenge_method": "S256",
             }
         )
-        return f"{metadata['authorization_endpoint']}?{query}"
+        endpoint: str = metadata["authorization_endpoint"]
+        if register:
+            # Keycloak exposes the registration form at .../registrations,
+            # which is the authorization endpoint with a different last segment.
+            endpoint = endpoint.rsplit("/", 1)[0] + "/registrations"
+        return f"{endpoint}?{query}"
 
     async def exchange_code(self, code: str, code_verifier: str) -> dict[str, Any]:
         """Swaps the code for tokens, server to server, with the client secret."""
