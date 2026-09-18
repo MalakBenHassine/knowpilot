@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:8.8.2-alpine
+    image: redis:8.10.0-alpine
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
     ports:
       # Published for LOCAL DEVELOPMENT ONLY, and on 127.0.0.1 only: the API
