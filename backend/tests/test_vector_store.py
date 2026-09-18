@@ -8,16 +8,12 @@ They run inside a transaction that is rolled back at the end, so they can be
 run against the development database without leaving anything behind.
 """
 
-import os
 import uuid
-from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.db.models import EMBEDDING_DIMENSIONS, Document
-from app.db.session import create_engine
 from app.db.vector_store import (
     delete_document,
     replace_document_chunks,
@@ -25,44 +21,13 @@ from app.db.vector_store import (
 )
 from app.rag.chunking import Chunk
 from app.rag.embeddings import EmbeddedChunk
+from tests.conftest import requires_database
 
 ALICE = "alice-sub-0001"
 BOB = "bob-sub-0002"
 MODEL = "BAAI/bge-m3"
 
-pytestmark = [
-    pytest.mark.anyio,
-    pytest.mark.skipif(
-        os.getenv("KP_RUN_DB_TESTS") != "1",
-        reason="set KP_RUN_DB_TESTS=1 and run docker compose up -d postgres",
-    ),
-]
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
-
-
-@pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
-    """A session wrapped in a transaction that is always rolled back.
-
-    The repository functions only flush, never commit, so everything written
-    here disappears at the end. That is also why they are written that way: the
-    caller decides where a transaction begins and ends.
-    """
-    engine = create_engine(get_settings().database_url)
-    connection = await engine.connect()
-    transaction = await connection.begin()
-    factory = async_sessionmaker(bind=connection, expire_on_commit=False)
-
-    async with factory() as session:
-        yield session
-
-    await transaction.rollback()
-    await connection.close()
-    await engine.dispose()
+pytestmark = [pytest.mark.anyio, requires_database]
 
 
 def unit_vector(axis: int) -> list[float]:

@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     postgres_db: str = "knowpilot"
 
+    # --- File storage ---
+    # Relative to the backend directory; .data/ is git-ignored at the repo
+    # root. In Docker this points at a mounted volume, because a container
+    # filesystem disappears on the next deploy.
+    upload_root: str = "../.data/uploads"
+
     # --- Embeddings (ADR-0006) ---
     # The name is part of the data contract with the vector index: changing it
     # invalidates every vector ever written, so it must be configuration, not a
