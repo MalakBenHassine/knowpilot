@@ -28,6 +28,12 @@ PDF_MAGIC = b"%PDF-"
 # Enough to recognise a file; also what the type sniffer looks at.
 SNIFF_BYTES = 2048
 
+# Tab, newline, carriage return and form feed are the only control characters
+# that belong in a text file. Every other byte below 0x20 says binary - and
+# note that they all decode perfectly well as UTF-8, so decoding alone would
+# happily accept a ZIP header like PK\x03\x04.
+TEXT_CONTROL_BYTES = frozenset({0x09, 0x0A, 0x0D, 0x0C})
+
 
 class StorageError(Exception):
     """Base class for every refusal at the storage boundary."""
@@ -50,6 +56,33 @@ class StoredFile:
     content_hash: str
 
 
+def safe_filename(raw: str | None) -> str:
+    """Clean a filename down to something safe to store and to display.
+
+    The name is never used on disk - the path is built from an identifier we
+    generate - but it is written to logs, returned in JSON and rendered in the
+    interface, and each of those is an attack surface of its own:
+
+    - `Path(...).name` drops any directory part, so a name carrying a path
+      cannot mislead a human reading a log line into thinking a file was
+      written somewhere else.
+    - Control characters are removed. A newline inside a filename lets an
+      attacker forge a second, entirely fake line in the logs - the trick is
+      called log injection, and it is how an intrusion gets buried under
+      plausible noise.
+    - The length is capped to fit the column, so a 10 kB name is refused at the
+      boundary rather than by the database in the middle of a transaction.
+    """
+    name = Path(raw or "").name
+    name = "".join(character for character in name if character.isprintable())
+    name = name.strip()
+    # A name made only of dots is what is left of "../.." once the directory
+    # part is gone. It is meaningless to display and confusing in a log line.
+    if not name or set(name) == {"."}:
+        return "document"
+    return name[:255]
+
+
 def detect_mime_type(head: bytes) -> str | None:
     """Recognise a file from its first bytes, never from its extension.
 
@@ -63,8 +96,11 @@ def detect_mime_type(head: bytes) -> str | None:
     if head.startswith(PDF_MAGIC):
         return "application/pdf"
 
-    # A NUL byte never appears in text and is the cheapest binary tell.
-    if b"\x00" in head:
+    # Control characters are the binary tell. Checking only for NUL is the
+    # obvious version and it is not enough: a ZIP starts with PK\x03\x04, which
+    # holds no NUL and decodes as valid UTF-8, so a decode-only check would
+    # accept an archive as a text file.
+    if any(byte < 0x20 and byte not in TEXT_CONTROL_BYTES for byte in head):
         return None
 
     # The sample can cut a multi-byte character in half, so drop up to three

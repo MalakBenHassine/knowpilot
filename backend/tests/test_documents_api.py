@@ -1,7 +1,8 @@
-"""GET /api/documents.
+"""The documents endpoints.
 
 What is tested is the boundary: who is refused, what the envelope looks like,
-and - above all - what never appears in a response.
+what never appears in a response, and which upload is rejected before a single
+byte is written.
 
 Needs PostgreSQL:
 
@@ -10,16 +11,26 @@ Needs PostgreSQL:
 
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import current_session, db_session
+from app.api.deps import (
+    current_session,
+    db_session,
+    get_embedding_model,
+    get_file_storage,
+    get_ingestion_store,
+    require_csrf,
+)
 from app.core.session import SessionData
+from app.core.storage import FileStorage
 from app.db.documents import create_document, mark_ready
 from app.main import app
 from tests.conftest import requires_database
+from tests.test_pipeline import FakeModel, FakeStore
 
 ALICE = "alice-sub-0001"
 BOB = "bob-sub-0002"
@@ -44,22 +55,44 @@ def signed_in_as(sub: str) -> SessionData:
 
 
 @pytest.fixture
-async def client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
-    """The real application, with two dependencies replaced.
+def indexing() -> FakeStore:
+    """Stands in for the background pipeline, and records that it ran."""
+    return FakeStore(None)
 
-    The database dependency hands over the test session, so everything written
-    by a request is rolled back with it. Authentication is replaced because
-    Keycloak has nothing to do with what this file tests - dragging a real
-    login in would make these tests slow and fragile without proving more.
+
+@pytest.fixture
+async def client(
+    session: AsyncSession, tmp_path: Path, indexing: FakeStore
+) -> AsyncIterator[AsyncClient]:
+    """The real application, with its edges replaced.
+
+    Overridden on purpose, and nothing else: the database hands over the test
+    session so every write is rolled back; files land in a temporary directory
+    rather than in the project; authentication and indexing are stubbed because
+    Keycloak and a 2.2 GB model have nothing to do with what this file proves.
+
+    Everything in between - validation, ordering, error translation - is the
+    real code.
     """
     app.dependency_overrides[db_session] = lambda: session
     app.dependency_overrides[current_session] = lambda: signed_in_as(ALICE)
+    app.dependency_overrides[require_csrf] = lambda: signed_in_as(ALICE)
+    app.dependency_overrides[get_file_storage] = lambda: FileStorage(tmp_path)
+    app.dependency_overrides[get_embedding_model] = FakeModel
+    app.dependency_overrides[get_ingestion_store] = lambda: indexing
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
     app.dependency_overrides.clear()
+
+
+def upload(content: bytes, filename: str = "notes.txt") -> dict[str, object]:
+    return {"files": {"file": (filename, content, "application/octet-stream")}}
+
+
+TEXT = b"Les conges payes sont de 25 jours par annee complete. " * 20
 
 
 async def add(session: AsyncSession, owner_id: str, filename: str) -> uuid.UUID:
@@ -132,3 +165,82 @@ async def test_an_anonymous_caller_is_refused(session: AsyncSession) -> None:
 
     app.dependency_overrides.clear()
     assert response.status_code == 401
+
+
+# --- POST /api/documents ---------------------------------------------------
+
+
+async def test_an_upload_is_accepted_immediately_as_processing(
+    client: AsyncClient, indexing: FakeStore
+) -> None:
+    response = await client.post("/api/documents", **upload(TEXT))
+
+    # 201 without waiting for indexing: embedding a long document takes a
+    # minute, and a request held open that long is killed by every proxy
+    # between here and the browser.
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "processing"
+    assert body["stage"] == "parsing"
+    assert body["mime_type"] == "text/plain"
+    assert body["size_bytes"] == len(TEXT)
+    # And the background task really was scheduled, and really ran - after the
+    # response, with its own persistence rather than the request session.
+    assert indexing.load_calls == 1
+
+
+async def test_a_type_we_do_not_read_is_refused_before_anything_is_written(
+    client: AsyncClient, tmp_path: Path
+) -> None:
+    response = await client.post("/api/documents", **upload(b"PK\x03\x04binary", "invoice.pdf"))
+
+    # 415, not 400: the request is well formed, we simply do not read ZIP -
+    # whatever the extension claims.
+    assert response.status_code == 415
+    # Nothing reached the disk: a refused upload must not cost a single write.
+    # ASYNC240 is about blocking IO starving the event loop; in a test there is
+    # no concurrency to starve, and looking at the disk is the whole point.
+    assert list(tmp_path.rglob("*")) == []  # noqa: ASYNC240
+
+
+async def test_an_empty_upload_is_refused(client: AsyncClient) -> None:
+    assert (await client.post("/api/documents", **upload(b""))).status_code == 400
+
+
+async def test_the_same_file_twice_is_a_conflict(client: AsyncClient) -> None:
+    assert (await client.post("/api/documents", **upload(TEXT))).status_code == 201
+
+    second = await client.post("/api/documents", **upload(TEXT, "copy.txt"))
+
+    # Recognised by content, not by name: renaming a file does not make it new,
+    # and re-indexing it would pay for the same embeddings twice.
+    assert second.status_code == 409
+
+
+async def test_a_hostile_filename_is_cleaned_before_it_is_stored(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/api/documents", **upload(TEXT, "../../etc/passwd\nFAKE LOG LINE")
+    )
+
+    stored = response.json()["filename"]
+    # The directory part is gone: what is stored and displayed is a name, never
+    # a path.
+    assert "/" not in stored
+    assert stored.isprintable()
+    assert stored.startswith("passwd")
+    # httpx percent-encodes the newline before the request even leaves the
+    # client, so what arrives here is already tame. A raw socket would not be
+    # so polite - which is exactly why safe_filename is tested on its own, on
+    # input no HTTP client ever sanitised.
+
+
+async def test_the_upload_response_hides_the_same_internal_fields(
+    client: AsyncClient,
+) -> None:
+    body = (await client.post("/api/documents", **upload(TEXT))).json()
+
+    assert "storage_path" not in body
+    assert "content_hash" not in body
+    assert "owner_id" not in body

@@ -8,6 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.session import SessionData, SessionStore
 from app.core.storage import FileStorage
+from app.db.ingestion import DatabaseIngestionStore
+from app.rag.embeddings import EmbeddingModel
+from app.rag.pipeline import IngestionStore
 
 
 def get_session_store(request: Request) -> SessionStore:
@@ -21,6 +24,34 @@ def get_file_storage(request: Request) -> FileStorage:
 
 
 Storage = Annotated[FileStorage, Depends(get_file_storage)]
+
+
+def get_embedding_model(request: Request) -> EmbeddingModel:
+    """The loaded model, or 503.
+
+    Refusing the upload is more honest than accepting a job we cannot run: the
+    user keeps their file and can try again, instead of watching a document
+    fail a minute later for a reason that has nothing to do with it.
+    """
+    model: EmbeddingModel | None = request.app.state.embedding_model
+    if model is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Indexing is unavailable")
+    return model
+
+
+Model = Annotated[EmbeddingModel, Depends(get_embedding_model)]
+
+
+def get_ingestion_store(request: Request) -> IngestionStore:
+    """Persistence for the background pipeline.
+
+    Built from the factory rather than from the request session: by the time
+    the task runs, the request session is closed and committed.
+    """
+    return DatabaseIngestionStore(request.app.state.session_factory)
+
+
+Ingestion = Annotated[IngestionStore, Depends(get_ingestion_store)]
 
 
 async def db_session(request: Request) -> AsyncIterator[AsyncSession]:

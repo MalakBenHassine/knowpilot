@@ -15,6 +15,7 @@ from app.core.storage import (
     FileStorage,
     FileTooLargeError,
     detect_mime_type,
+    safe_filename,
 )
 
 
@@ -53,6 +54,14 @@ def test_a_file_named_pdf_but_holding_a_zip_is_refused() -> None:
 
 def test_binary_content_is_refused() -> None:
     assert detect_mime_type(b"\x89PNG\r\n\x1a\n\x00\x00") is None
+
+
+def test_binary_without_a_single_nul_byte_is_still_refused() -> None:
+    # Found by the API test, not by this file: my first sniffer only looked for
+    # NUL, and a ZIP header holds none. PK\x03\x04 decodes as valid UTF-8, so
+    # an archive was being accepted as a text document. A convenient sample -
+    # one that happened to contain NUL - had hidden the gap.
+    assert detect_mime_type(b"PK\x03\x04binary") is None
 
 
 # --- Writing files ---------------------------------------------------------
@@ -125,3 +134,34 @@ def test_deleting_is_safe_to_repeat(tmp_path: Path) -> None:
     storage.delete(document_id)
 
     assert not storage.path_for(document_id).exists()
+
+
+# --- Filenames -------------------------------------------------------------
+
+
+def test_a_filename_keeps_only_its_last_segment() -> None:
+    # Never used on disk, but written to logs and rendered in the interface.
+    assert safe_filename("../../etc/passwd") == "passwd"
+    assert safe_filename("C:/Users/malak/contract.pdf") == "contract.pdf"
+
+
+def test_control_characters_are_removed_from_a_filename() -> None:
+    # A newline inside a name lets an attacker forge a second, entirely fake
+    # line in the logs. It is called log injection, and it is how an intrusion
+    # gets buried under plausible noise.
+    cleaned = safe_filename("report.pdf\n2026-09-18 INFO user admin logged in")
+
+    assert "\n" not in cleaned
+    assert cleaned.isprintable()
+
+
+def test_an_absurdly_long_filename_is_cut_to_the_column_size() -> None:
+    # Refused at the boundary rather than by the database, halfway through a
+    # transaction that has already written a file to disk.
+    assert len(safe_filename("a" * 10_000)) == 255
+
+
+def test_a_missing_or_blank_filename_still_yields_something_displayable() -> None:
+    assert safe_filename(None) == "document"
+    assert safe_filename("   ") == "document"
+    assert safe_filename("../..") == "document"
