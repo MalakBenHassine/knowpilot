@@ -33,6 +33,21 @@ class Settings(BaseSettings):
     # Where the browser is sent back after login and logout.
     frontend_url: str = "http://localhost:5173"
 
+    # --- Embeddings (ADR-0006) ---
+    # The name is part of the data contract with the vector index: changing it
+    # invalidates every vector ever written, so it must be configuration, not a
+    # constant buried in the code.
+    embedding_model: str = "BAAI/bge-m3"
+    # Loading costs ~20 s and 2.2 GB of RAM. Turned off while working on
+    # anything other than ingestion, and always off in tests.
+    embeddings_enabled: bool = True
+    # Where the weights are cached. None uses the Hugging Face default
+    # (~/.cache/huggingface). In Docker this points at a mounted volume, so a
+    # restart does not download two gigabytes again.
+    # Named `embedding_cache_dir`, not `model_cache_dir`: pydantic reserves the
+    # `model_` prefix for its own API and would warn about the collision.
+    embedding_cache_dir: str | None = None
+
     @property
     def cookie_secure(self) -> bool:
         """`Secure` is always on: browsers accept it on http://localhost."""

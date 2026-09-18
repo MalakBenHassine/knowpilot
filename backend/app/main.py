@@ -8,6 +8,7 @@ from app.api.routes import auth, health
 from app.core.config import get_settings
 from app.core.oidc import OidcClient
 from app.core.session import SessionStore
+from app.rag.model import LocalEmbeddingModel
 
 settings = get_settings()
 
@@ -26,8 +27,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Now that the dependency exists, the readiness probe can report on it.
     health.READINESS_CHECKS["cache"] = store.ping
 
+    # Loaded once, here, before the application accepts a single connection.
+    # Blocking the event loop is correct at this point: nothing else is running
+    # yet, and FastAPI serves nothing until the lifespan has finished - so the
+    # readiness probe physically cannot answer "ready" while the weights load.
+    app.state.embedding_model = None
+    if settings.embeddings_enabled:
+        app.state.embedding_model = LocalEmbeddingModel.load(
+            settings.embedding_model, settings.embedding_cache_dir
+        )
+
+        async def embeddings_ready() -> bool:
+            return app.state.embedding_model is not None
+
+        health.READINESS_CHECKS["embeddings"] = embeddings_ready
+
     yield
 
+    health.READINESS_CHECKS.pop("embeddings", None)
     health.READINESS_CHECKS.pop("cache", None)
     await redis.aclose()
 

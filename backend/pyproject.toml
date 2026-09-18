@@ -9,6 +9,8 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "pypdf>=6.19.0",
     "redis>=6",
+    "sentence-transformers>=6.1.0",
+    "torch>=2.14.0",
 ]
 
 # The application ships as a container and is never published to an index:
@@ -47,3 +49,13 @@ dev = [
     "reportlab>=5.0.1",
     "ruff>=0.16.8",
 ]
+# PyTorch ships one wheel per accelerator, and the default index serves the
+# CUDA build: ~2.5 GB of GPU code that would never run on a CPU-only VM.
+# `explicit` means this index is used *only* for the packages mapped to it.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
