@@ -7,6 +7,7 @@ dependencies = [
     "fastapi[standard]>=0.141.1",
     "joserfc>=1.7.5",
     "pydantic-settings>=2.15.0",
+    "pypdf>=6.19.0",
     "redis>=6",
 ]
 
@@ -43,5 +44,6 @@ dev = [
     "httpx2>=2.13.0",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
+    "reportlab>=5.0.1",
     "ruff>=0.16.8",
 ]
