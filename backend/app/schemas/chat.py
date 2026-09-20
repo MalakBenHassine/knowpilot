@@ -6,7 +6,9 @@ client gets to choose, and every one of them would have to be validated,
 rate-limited or ignored. The safest input is the one that was never accepted.
 """
 
-from typing import Annotated
+import uuid
+from collections.abc import Sequence
+from typing import Annotated, Protocol
 
 from pydantic import BaseModel, StringConstraints
 
@@ -23,6 +25,10 @@ Question = Annotated[
     StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_QUESTION_CHARACTERS),
 ]
 
+# Enough of the passage to recognise it without opening the document, short
+# enough that five of them do not turn a small answer into a large payload.
+SNIPPET_CHARACTERS = 240
+
 
 class ChatRequest(BaseModel):
     """One field, on purpose.
@@ -38,17 +44,50 @@ class ChatRequest(BaseModel):
     question: Question
 
 
+class SourceChunk(Protocol):
+    """What a citation needs beyond what the model wrote.
+
+    A Protocol rather than an import of RetrievedChunk: a schema describing
+    what leaves the server has no business depending on the module that talks
+    to the database. Anything carrying these two attributes fits.
+    """
+
+    # Declared as read-only properties rather than plain attributes: a bare
+    # annotation in a Protocol means a MUTABLE attribute, and a frozen
+    # dataclass - which every value object in this codebase is - would not
+    # satisfy it. mypy caught exactly that.
+    @property
+    def document_id(self) -> uuid.UUID: ...
+
+    @property
+    def text(self) -> str: ...
+
+
+def _snippet(text: str) -> str:
+    """Cut on a word boundary, so the quote does not end mid-syllable."""
+    if len(text) <= SNIPPET_CHARACTERS:
+        return text
+    cut = text.rfind(" ", 0, SNIPPET_CHARACTERS)
+    return text[: cut if cut > 0 else SNIPPET_CHARACTERS].rstrip() + "..."
+
+
 class CitationResponse(BaseModel):
     """What the user needs to check the answer for themselves.
 
-    `number` is what the model wrote between brackets; the filename and page
-    were attached by us afterwards. The model never saw either, which is why it
-    could not have invented them.
+    `number` is what the model wrote between brackets; everything else was
+    attached by us afterwards. The model never saw a filename, a page or an
+    identifier, which is why it could not have invented them.
     """
 
     number: int
+    # So the interface can link straight to the document it came from.
+    document_id: uuid.UUID
     filename: str
     page_number: int
+    # The reason a citation is worth anything: the user reads the sentence the
+    # answer came from without leaving the page. A citation nobody can check is
+    # decoration.
+    snippet: str
 
 
 class ChatResponse(BaseModel):
@@ -63,20 +102,27 @@ class ChatResponse(BaseModel):
     is_grounded: bool
 
     @classmethod
-    def of(cls, answer: Answer) -> "ChatResponse":
+    def of(cls, answer: Answer, sources: Sequence[SourceChunk]) -> "ChatResponse":
         """Built field by field, never with from_attributes.
 
-        An explicit mapping cannot start leaking a field that someone adds to
+        An explicit mapping cannot start leaking a field that somebody adds to
         the dataclass later. A response schema is a promise about what leaves
         the server, and promises are written down.
+
+        `sources` is the very list that built the prompt, in the same order, so
+        citation number n refers to sources[n - 1]. Those numbers were already
+        checked against that length in `generation`, which is what makes this
+        indexing safe rather than hopeful.
         """
         return cls(
             answer=answer.text,
             citations=[
                 CitationResponse(
                     number=citation.number,
+                    document_id=sources[citation.number - 1].document_id,
                     filename=citation.filename,
                     page_number=citation.page_number,
+                    snippet=_snippet(sources[citation.number - 1].text),
                 )
                 for citation in answer.citations
             ],

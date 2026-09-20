@@ -18,6 +18,21 @@ export function formatKind(mimeType: string): string {
   return 'FILE'
 }
 
+/**
+ * A waiting time a person can act on: "a moment", "12 minutes", "3 hours".
+ *
+ * Rounded up, never down: telling somebody to come back in 2 hours when the
+ * counter resets in 2 h 50 earns one more refusal. An estimate that errs
+ * towards patience is kinder than one that errs towards a second rejection.
+ */
+export function formatWait(seconds: number): string {
+  if (seconds < 60) return 'a moment'
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `${minutes} minutes`
+  const hours = Math.ceil(minutes / 60)
+  return hours === 1 ? 'an hour' : `${hours} hours`
+}
+
 /** Short relative time: "just now", "5 min ago", "3 d ago". */
 export function formatRelativeTime(isoDate: string): string {
   const elapsedMs = Date.now() - new Date(isoDate).getTime()

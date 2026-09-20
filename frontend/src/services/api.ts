@@ -13,18 +13,37 @@ const DEFAULT_TIMEOUT_MS = 30_000
 export class ApiError extends Error {
   readonly status: number
   readonly kind: ChatErrorKind
+  /**
+   * Seconds until the request is worth repeating, when the server said so.
+   * Only a 429 carries it, and only because the backend sets Retry-After: a
+   * refusal that does not say when to come back invites an immediate retry,
+   * which is refused again.
+   */
+  readonly retryAfterSeconds?: number
 
-  constructor(message: string, status: number, kind: ChatErrorKind) {
+  constructor(message: string, status: number, kind: ChatErrorKind, retryAfterSeconds?: number) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.kind = kind
+    this.retryAfterSeconds = retryAfterSeconds
   }
 }
 
 function kindFromStatus(status: number): ChatErrorKind {
   if (status === 429) return 'rate_limited'
   return 'server'
+}
+
+/**
+ * Reads Retry-After, treating it as untrusted input like any other header.
+ * A missing, malformed or negative value simply means "we were not told".
+ */
+function retryAfterFrom(response: Response): number | undefined {
+  const raw = response.headers.get('Retry-After')
+  if (!raw) return undefined
+  const seconds = Number(raw)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined
 }
 
 /**
@@ -75,7 +94,12 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   if (!response.ok) {
     // Backend details are never surfaced to the user, only the status class.
-    throw new ApiError(`Request failed (${response.status})`, response.status, kindFromStatus(response.status))
+    throw new ApiError(
+      `Request failed (${response.status})`,
+      response.status,
+      kindFromStatus(response.status),
+      retryAfterFrom(response),
+    )
   }
 
   return (await response.json()) as T

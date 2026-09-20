@@ -131,7 +131,7 @@ async def ask(
 
     # 7. A refusal still costs a call, so it is not refunded: the tokens were
     #    spent, and the honest answer is the product working, not failing.
-    return ChatResponse.of(answer)
+    return ChatResponse.of(answer, found)
 
 
 async def _embed(question: str, embeddings: EmbeddingModel) -> list[float]:

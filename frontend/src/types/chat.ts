@@ -23,7 +23,17 @@ export type AssistantTurnState =
   | { phase: 'loading'; stage: LoadingStage }
   | { phase: 'answered'; answer: string; sources: Source[] }
   | { phase: 'insufficient_evidence' }
-  | { phase: 'error'; kind: ChatErrorKind }
+  | {
+      phase: 'error'
+      kind: ChatErrorKind
+      /**
+       * Present only when the server told us when to come back (a 429 with a
+       * Retry-After header). Optional rather than defaulted: "we were not
+       * told" and "come back in zero seconds" are different facts, and the
+       * copy must be able to tell them apart.
+       */
+      retryAfterSeconds?: number
+    }
 
 export interface UserTurn {
   id: string

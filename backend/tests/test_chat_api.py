@@ -38,6 +38,7 @@ from app.rag.chunking import Chunk
 from app.rag.embeddings import EmbeddedChunk
 from app.rag.generation import REFUSAL
 from app.rag.groq import LanguageModelUnavailableError, QuotaExhaustedError
+from app.schemas.chat import SNIPPET_CHARACTERS
 from tests.conftest import requires_database
 from tests.test_documents_api import signed_in_as
 from tests.test_pipeline import FakeModel
@@ -179,14 +180,24 @@ async def test_an_empty_library_answers_without_calling_the_model(
 async def test_an_answer_carries_the_source_the_model_never_saw(
     client: AsyncClient, session: AsyncSession, llm: FakeLlm
 ) -> None:
-    await add_passage(session, ALICE, "conges.pdf", "Les conges payes sont de 25 jours. " * 10)
+    document_id = await add_passage(
+        session, ALICE, "conges.pdf", "Les conges payes sont de 25 jours. " * 10
+    )
 
     response = await client.post("/api/chat", **ask())
     body = response.json()
 
     assert response.status_code == 200
     assert body["is_grounded"] is True
-    assert body["citations"] == [{"number": 1, "filename": "conges.pdf", "page_number": 7}]
+    citation = body["citations"][0]
+    assert citation["number"] == 1
+    assert citation["filename"] == "conges.pdf"
+    assert citation["page_number"] == 7
+    assert citation["document_id"] == str(document_id)
+    # A citation nobody can check is decoration: the snippet is what lets
+    # the user read the sentence the answer came from.
+    assert citation["snippet"].startswith("Les conges payes")
+    assert len(citation["snippet"]) <= SNIPPET_CHARACTERS + 3
     # The filename and the page were attached by us afterwards. The prompt
     # carried neither, which is why an invented citation was not possible.
     _, prompt = llm.calls[0]

@@ -193,6 +193,36 @@ never leaves a row pointing at bytes that are gone.
 Only the backend decides whether a second attempt can succeed. A scanned page
 will never become readable; a full disk might have been emptied.
 
-### Not specified yet
+### `POST /api/chat`
 
-`POST /api/chat` is designed in its own feature.
+- Authentication: required - CSRF header: required
+- Body: `{ "question": string }` and nothing else
+- `200` with `{ answer, citations, is_grounded }`
+- `422` when the question is blank or longer than 1000 characters
+- `429` with a `Retry-After` header in seconds, when a budget is spent
+- `503` when answering is disabled or the provider failed
+
+The body carries a question and only a question. There is no owner field,
+no document filter and no model name: the owner comes from the session
+cookie, so the wrong value does not exist in the handler for anyone to
+take by mistake.
+
+`is_grounded: false` is a SUCCESS, not an error. It means either that no
+passage of this user was close enough to the question, or that the model
+declined to answer from what it was given. `answer` is then empty and
+`citations` is empty, and the interface says so without an error style -
+the browser already knows whether the user owns any document, so it picks
+the right sentence.
+
+Each citation is `{ number, document_id, filename, page_number, snippet }`.
+`number` is what the model wrote between brackets; everything else was
+attached by the server afterwards. The model is shown the passages as
+`[1]` to `[5]` and never sees a filename or a page, so a citation it could
+not have produced is not merely detected - it is inexpressible.
+
+A question is charged against two daily budgets, per user and per service.
+It is refunded when the provider was unreachable, timed out or refused us,
+because an outage must not cost a user part of their day. A grounded
+refusal is NOT refunded: the call happened and the tokens were spent.
+
+Nothing is charged when retrieval finds nothing, because nothing is sent.

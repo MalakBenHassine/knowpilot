@@ -1,13 +1,19 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError } from '../services/api'
 import { askQuestion } from '../services/chat'
-import type { AssistantTurn, ChatErrorKind, ChatTurn, UserTurn } from '../types/chat'
+import type { AssistantTurn, AssistantTurnState, ChatTurn, UserTurn } from '../types/chat'
 
 /** Delay before the loading copy moves from "searching" to "generating". */
 const GENERATING_STAGE_DELAY_MS = 1200
 
-function errorKindOf(error: unknown): ChatErrorKind {
-  return error instanceof ApiError ? error.kind : 'server'
+/**
+ * Anything that is not an ApiError is a bug in our own code, and a bug is a
+ * server-class failure from the point of view of somebody waiting for an
+ * answer: the honest thing to show is "something went wrong", not a guess.
+ */
+function errorStateOf(error: unknown): AssistantTurnState {
+  if (!(error instanceof ApiError)) return { phase: 'error', kind: 'server' }
+  return { phase: 'error', kind: error.kind, retryAfterSeconds: error.retryAfterSeconds }
 }
 
 /**
@@ -47,7 +53,7 @@ export function useChat() {
             : { phase: 'insufficient_evidence' },
         )
       } catch (error) {
-        updateAssistantTurn(assistantTurnId, { phase: 'error', kind: errorKindOf(error) })
+        updateAssistantTurn(assistantTurnId, errorStateOf(error))
       } finally {
         window.clearTimeout(stageTimer)
         setIsBusy(false)

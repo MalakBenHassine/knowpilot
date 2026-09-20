@@ -1,5 +1,6 @@
-import { RotateCcw, SearchX, TriangleAlert } from 'lucide-react'
+import { Clock, RotateCcw, SearchX, TriangleAlert } from 'lucide-react'
 import Markdown from 'react-markdown'
+import { formatWait } from '../../lib/format'
 import type { AssistantTurn, ChatErrorKind } from '../../types/chat'
 import type { Source } from '../../types/source'
 import { Button } from '../ui/Button'
@@ -12,6 +13,20 @@ const ERROR_COPY: Record<ChatErrorKind, string> = {
   timeout: 'The answer took too long to arrive. Please try again.',
   rate_limited: 'Too many questions in a short time. Wait a moment and try again.',
   server: 'Something went wrong on our side. Please try again.',
+}
+
+/**
+ * A refusal that says WHEN to come back.
+ *
+ * The backend sends Retry-After precisely so the interface does not have to
+ * guess, and "try again in about 3 hours" is something a person can act on -
+ * "try again later" is something they can only re-attempt and be refused for.
+ */
+function errorCopy(kind: ChatErrorKind, retryAfterSeconds?: number): string {
+  if (kind === 'rate_limited' && retryAfterSeconds !== undefined) {
+    return `You have used your questions for now. Try again in ${formatWait(retryAfterSeconds)}.`
+  }
+  return ERROR_COPY[kind]
 }
 
 export function AssistantMessage({
@@ -70,16 +85,48 @@ export function AssistantMessage({
         ) : null}
 
         {turn.state.phase === 'error' ? (
-          <div className="rounded-lg border border-transparent bg-danger-soft p-4" role="alert">
+          // A budget that is spent is not a malfunction, so it does not get the
+          // alarming colour: the neutral surface says "come back later", the
+          // danger surface says "something is broken". Conflating the two
+          // teaches people to ignore both.
+          <div
+            className={
+              turn.state.kind === 'rate_limited'
+                ? 'rounded-lg border border-line bg-surface-sunken p-4'
+                : 'rounded-lg border border-transparent bg-danger-soft p-4'
+            }
+            role="alert"
+          >
             <p className="flex items-center gap-2 font-medium text-ink">
-              <TriangleAlert size={16} className="text-danger" />
-              Something went wrong.
+              {turn.state.kind === 'rate_limited' ? (
+                <>
+                  <Clock size={16} className="text-ink-muted" />
+                  You have reached your limit.
+                </>
+              ) : (
+                <>
+                  <TriangleAlert size={16} className="text-danger" />
+                  Something went wrong.
+                </>
+              )}
             </p>
-            <p className="mt-1.5 text-body text-ink-muted">{ERROR_COPY[turn.state.kind]}</p>
-            <Button size="sm" variant="secondary" className="mt-3" onClick={() => onRetry(turn.id)}>
-              <RotateCcw size={13} />
-              Retry
-            </Button>
+            <p className="mt-1.5 text-body text-ink-muted">
+              {errorCopy(turn.state.kind, turn.state.retryAfterSeconds)}
+            </p>
+            {/* No Retry button on a spent budget: the only thing it can produce
+                is the same refusal, and a button that cannot work is worse than
+                no button. */}
+            {turn.state.kind === 'rate_limited' ? null : (
+              <Button
+                size="sm"
+                variant="secondary"
+                className="mt-3"
+                onClick={() => onRetry(turn.id)}
+              >
+                <RotateCcw size={13} />
+                Retry
+              </Button>
+            )}
           </div>
         ) : null}
       </div>
