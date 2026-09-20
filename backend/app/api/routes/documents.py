@@ -9,7 +9,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Response, UploadFile, status
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CsrfProtected, CurrentSession, Db, Ingestion, Model, Storage
@@ -24,6 +24,7 @@ from app.core.storage import (
     safe_filename,
 )
 from app.db import documents as repository
+from app.db import vector_store
 from app.rag.pipeline import ingest_document
 from app.schemas.document import DocumentListResponse, DocumentResponse
 
@@ -136,4 +137,79 @@ async def upload_document(
         owner_id=session.sub,
     )
 
+    return DocumentResponse.of(document)
+
+
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a document",
+)
+async def delete_document(
+    session: CsrfProtected,
+    database: Db,
+    storage: Storage,
+    background: BackgroundTasks,
+    document_id: uuid.UUID,
+) -> Response:
+    """Remove a document, its passages and its bytes.
+
+    404 both when it does not exist and when it belongs to somebody else: a 403
+    would confirm the identifier is real, which is enough to enumerate accounts.
+    """
+    deleted = await vector_store.delete_document(
+        database, owner_id=session.sub, document_id=document_id
+    )
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    # The chunks are gone with the row, by ON DELETE CASCADE, in this very
+    # transaction. The file cannot join that transaction - a filesystem has no
+    # rollback - so it is removed AFTER the response, which means after the
+    # commit. Deleting it here would risk erasing the bytes of a document whose
+    # deletion was then rolled back, leaving a row pointing at nothing.
+    background.add_task(storage.delete, document_id)
+
+    # 204: there is nothing sensible to return, and an empty body is not JSON.
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{document_id}/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Retry a failed ingestion",
+)
+async def retry_document(
+    session: CsrfProtected,
+    database: Db,
+    model: Model,
+    store: Ingestion,
+    background: BackgroundTasks,
+    document_id: uuid.UUID,
+) -> DocumentResponse:
+    """Run the pipeline again on a document that failed for a passing reason.
+
+    202 Accepted, not 200: the work is scheduled, not done. The document comes
+    back as `processing` and the interface follows the stage as before.
+    """
+    document = await repository.get_document(
+        database, owner_id=session.sub, document_id=document_id
+    )
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+    if document.status != "failed" or not document.retryable:
+        # 409, not 404: the document exists and belongs to the caller, the
+        # request simply makes no sense for its current state. A scanned page
+        # will not become readable because it is asked twice.
+        raise HTTPException(status.HTTP_409_CONFLICT, "This document cannot be retried")
+
+    await repository.reset_for_retry(database, document_id=document_id)
+    background.add_task(
+        ingest_document,
+        store,
+        model,
+        document_id=document_id,
+        owner_id=session.sub,
+    )
     return DocumentResponse.of(document)

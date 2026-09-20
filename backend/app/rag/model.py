@@ -61,7 +61,10 @@ class LocalEmbeddingModel:
         # Ask the model for its own dimension rather than hard-coding 1024: a
         # constant would silently disagree the day the model changes, and the
         # disagreement would only surface as poor search results.
-        dimensions = model.get_sentence_embedding_dimension()
+        # `get_sentence_embedding_dimension` still works but is deprecated; a
+        # FutureWarning is a removal announcement, and ignoring one only moves
+        # the failure to a day when nobody remembers what changed.
+        dimensions = model.get_embedding_dimension()
         if dimensions is None:
             raise RuntimeError(f"{name} does not report an embedding dimension")
 

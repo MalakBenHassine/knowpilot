@@ -1,8 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ApiError } from '../services/api'
 import * as documentsService from '../services/documents'
 import type { StoredDocument } from '../types/document'
 
 const POLL_INTERVAL_MS = 1500
+
+/**
+ * Turns a status code into something a person can act on.
+ *
+ * The backend deliberately returns codes and never sentences: the wording is a
+ * product decision, it has to be translatable, and a technical message would
+ * leak internals. Telling someone to "try again" when their file is simply too
+ * large only wastes their time.
+ */
+function uploadErrorMessage(file: File, error: unknown): string {
+  if (error instanceof ApiError) {
+    switch (error.status) {
+      case 409:
+        return `${file.name} has already been uploaded.`
+      case 413:
+        return `${file.name} is too large. The limit is 20 MB.`
+      case 415:
+        return `${file.name} is not a PDF or a text file.`
+      case 400:
+        return `${file.name} is empty.`
+      case 503:
+        return 'Indexing is temporarily unavailable. Please try again in a moment.'
+    }
+  }
+  return `${file.name} could not be uploaded. Please try again.`
+}
 
 interface DocumentsState {
   documents: StoredDocument[]
@@ -74,13 +101,16 @@ export function useDocuments() {
       try {
         await documentsService.uploadDocument(file)
         await refresh()
-      } catch {
+      } catch (error) {
         if (!isMountedRef.current) return
+        // The optimistic row is removed: leaving it would show a document that
+        // does not exist on the server, and the next poll would erase it
+        // anyway, which looks like a glitch rather than a refusal.
         setState((previous) => ({
           ...previous,
           documents: previous.documents.filter((document) => document.id !== optimistic.id),
         }))
-        setUploadError(`${file.name} could not be uploaded. Please try again.`)
+        setUploadError(uploadErrorMessage(file, error))
       }
     },
     [refresh],

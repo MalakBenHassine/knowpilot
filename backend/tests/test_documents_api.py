@@ -27,7 +27,7 @@ from app.api.deps import (
 )
 from app.core.session import SessionData
 from app.core.storage import FileStorage
-from app.db.documents import create_document, mark_ready
+from app.db.documents import create_document, mark_failed, mark_ready
 from app.main import app
 from tests.conftest import requires_database
 from tests.test_pipeline import FakeModel, FakeStore
@@ -244,3 +244,88 @@ async def test_the_upload_response_hides_the_same_internal_fields(
     assert "storage_path" not in body
     assert "content_hash" not in body
     assert "owner_id" not in body
+
+
+# --- DELETE /api/documents/{id} --------------------------------------------
+
+
+async def test_deleting_removes_the_document_and_its_bytes(
+    client: AsyncClient, tmp_path: Path
+) -> None:
+    created = (await client.post("/api/documents", **upload(TEXT))).json()
+
+    response = await client.delete(f"/api/documents/{created['id']}")
+
+    # 204: nothing sensible to return, and an empty body is not valid JSON.
+    assert response.status_code == 204
+    assert (await client.get("/api/documents")).json() == {"items": []}
+    # The file is removed after the response, once the deletion is committed.
+    assert list(tmp_path.rglob("*.*")) == []  # noqa: ASYNC240
+
+
+async def test_deleting_the_document_of_another_user_is_a_404(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    document_id = await add(session, BOB, "not-mine.pdf")
+
+    response = await client.delete(f"/api/documents/{document_id}")
+
+    # 404, never 403: a 403 would confirm the identifier is real, which is all
+    # an attacker needs to enumerate other accounts.
+    assert response.status_code == 404
+
+
+async def test_deleting_something_that_never_existed_is_the_same_404(
+    client: AsyncClient,
+) -> None:
+    response = await client.delete(f"/api/documents/{uuid.uuid4()}")
+
+    # Indistinguishable from the previous case, on purpose.
+    assert response.status_code == 404
+
+
+# --- POST /api/documents/{id}/retry ----------------------------------------
+
+
+async def test_a_retryable_failure_can_be_retried(
+    client: AsyncClient, session: AsyncSession, indexing: FakeStore
+) -> None:
+    document_id = await add(session, ALICE, "contract.pdf")
+    await mark_failed(session, document_id=document_id, reason="processing_error", retryable=True)
+
+    response = await client.post(f"/api/documents/{document_id}/retry")
+
+    # 202 Accepted, not 200: the work is scheduled, not finished.
+    assert response.status_code == 202
+    assert indexing.load_calls == 1
+    listed = (await client.get("/api/documents")).json()["items"][0]
+    assert listed["status"] == "processing"
+    assert listed["failure_reason"] is None
+    # No retry button while a retry is already running.
+    assert listed["retryable"] is False
+
+
+async def test_a_permanent_failure_cannot_be_retried(
+    client: AsyncClient, session: AsyncSession, indexing: FakeStore
+) -> None:
+    document_id = await add(session, ALICE, "scan.pdf")
+    await mark_failed(session, document_id=document_id, reason="no_text_found", retryable=False)
+
+    response = await client.post(f"/api/documents/{document_id}/retry")
+
+    # 409 and not 404: the document exists and is the caller's, the request
+    # simply makes no sense for its state. A scan will not become readable
+    # because it is asked a second time.
+    assert response.status_code == 409
+    assert indexing.load_calls == 0
+
+
+async def test_retrying_the_document_of_another_user_is_a_404(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    document_id = await add(session, BOB, "not-mine.pdf")
+    await mark_failed(session, document_id=document_id, reason="processing_error", retryable=True)
+
+    response = await client.post(f"/api/documents/{document_id}/retry")
+
+    assert response.status_code == 404

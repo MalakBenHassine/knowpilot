@@ -146,8 +146,53 @@ Lists the documents of the **current user**, newest first.
 **Never returned:** `owner_id`, storage path, content hash, internal error text.
 The response is built from an explicit schema, never from the database model.
 
+### `POST /api/documents`
+
+Uploads one file as `multipart/form-data` under the field `file`, and returns
+**immediately**. Indexing runs in the background: embedding a long document
+takes about a minute, and a request held open that long is killed by every
+proxy between the browser and here.
+
+- Authentication: required · CSRF header: required
+- `201` with the document, `status: "processing"`, `stage: "parsing"`
+
+| Code | When | What the client should say |
+| ---- | ---- | -------------------------- |
+| `400` | The file is empty | "This file is empty" |
+| `409` | The same content was already uploaded **by this user** | "Already uploaded" |
+| `413` | Over 20 MB | "Too large, 20 MB maximum" |
+| `415` | Not a PDF and not UTF-8 text | "Only PDF and text files" |
+| `503` | The embedding model is not loaded | "Try again in a moment" |
+
+The type is detected **from the first bytes of the content**, never from the
+extension or from the declared `Content-Type`: both are chosen by whoever
+uploads. Deduplication is per user and based on a SHA-256 of the content, so
+renaming a file does not make it new — and a hash belonging to another account
+is never consulted, which would turn it into an oracle.
+
+The client polls `GET /api/documents` while any document is `processing`, and
+follows the real `stage`.
+
+### `DELETE /api/documents/{id}`
+
+- Authentication: required · CSRF header: required
+- `204` with an empty body
+- `404` when it does not exist **or is not yours** — indistinguishable
+
+Deletes the document, its passages (by cascade, in the same transaction) and
+its bytes. The file is removed after the response, so a rolled-back deletion
+never leaves a row pointing at bytes that are gone.
+
+### `POST /api/documents/{id}/retry`
+
+- Authentication: required · CSRF header: required
+- `202` with the document back in `processing`
+- `404` when it does not exist or is not yours
+- `409` when the document is not `failed`, or failed with `retryable: false`
+
+Only the backend decides whether a second attempt can succeed. A scanned page
+will never become readable; a full disk might have been emptied.
+
 ### Not specified yet
 
-`POST /api/documents`, `DELETE /api/documents/{id}`, `POST /api/chat` and the
-auth endpoints are designed in their own feature. The frontend currently runs
-against a mock implementing this same contract (`VITE_API_MODE=mock`).
+`POST /api/chat` is designed in its own feature.

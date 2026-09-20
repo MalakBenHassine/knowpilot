@@ -119,6 +119,24 @@ async def mark_ready(
     await session.flush()
 
 
+async def reset_for_retry(session: AsyncSession, *, document_id: uuid.UUID) -> None:
+    """Put a failed document back at the start of the pipeline.
+
+    `retryable` goes back to False on purpose: whether a second attempt can
+    succeed is decided by the outcome of this run, not by the previous one.
+    Leaving it True would offer a retry button for a document that is currently
+    being retried.
+    """
+    document = await session.get(Document, document_id)
+    if document is None:
+        return
+    document.status = "processing"
+    document.stage = "parsing"
+    document.failure_reason = None
+    document.retryable = False
+    await session.flush()
+
+
 async def mark_failed(
     session: AsyncSession, *, document_id: uuid.UUID, reason: str, retryable: bool
 ) -> None:
