@@ -77,6 +77,30 @@ class Settings(BaseSettings):
     # models endpoint queried with the real key.
     groq_model: str = "openai/gpt-oss-120b"
 
+    # --- Retrieval policy ---
+    # Cosine distance above which a passage is treated as not about the
+    # question: 0 is identical, 1 is unrelated. The strongest guard of the
+    # whole feature, because it runs BEFORE the provider is called - there is
+    # nothing to hallucinate from if nothing was sent, and nothing to pay for.
+    #
+    # Configuration rather than a constant, for the same reason as the budgets:
+    # the right value depends on the documents. A library of short, single-
+    # topic notes tolerates a tighter ceiling than one of long mixed pages,
+    # where a chunk covering three subjects has an averaged vector that matches
+    # none of them closely.
+    #
+    # Change it with the evaluation harness open. Loosening it does not only
+    # find more answers: it also lets weaker passages reach the model, and the
+    # measure of success is that the refusals still refuse.
+    max_distance: float = Field(default=0.6, gt=0.0, le=2.0)
+
+    # How many passages reach the model. Tied to the chunk size rather than
+    # chosen alone: eight chunks of six hundred characters carry about the same
+    # context - and therefore about the same token cost - as the five chunks of
+    # a thousand this replaced. Raising it without shrinking chunks would spend
+    # budget for context the question did not need.
+    top_k: int = Field(default=8, ge=1, le=20)
+
     # --- Daily question budgets (ADR-0012) ---
     # Policy, not logic, which is why it lives here rather than as a constant
     # in the module that enforces it. The same code runs on a laptop with one

@@ -35,7 +35,7 @@ from app.db import vector_store
 from app.db.ingestion import DatabaseIngestionStore
 from app.db.session import create_engine, create_session_factory
 from app.rag.embeddings import embed_query
-from app.rag.generation import MAX_DISTANCE, TOP_K, Answer, Passage, answer_question
+from app.rag.generation import Answer, Passage, answer_question
 from app.rag.groq import GroqLanguageModel
 from app.rag.model import LocalEmbeddingModel
 from app.rag.pipeline import ingest_document
@@ -125,7 +125,7 @@ async def ingest_fixtures(factory, model, storage: FileStorage) -> list[uuid.UUI
     return created
 
 
-async def run_case(case: Case, factory, model, llm) -> Outcome:  # type: ignore[no-untyped-def]
+async def run_case(case: Case, factory, model, llm, settings) -> Outcome:  # type: ignore[no-untyped-def]
     """The exact chain POST /api/chat runs, minus HTTP and the quota."""
     started = time.monotonic()
     vector = embed_query(case.question, model)
@@ -135,8 +135,8 @@ async def run_case(case: Case, factory, model, llm) -> Outcome:  # type: ignore[
             session,
             owner_id=case.asked_by,
             query_vector=vector,
-            limit=TOP_K,
-            max_distance=MAX_DISTANCE,
+            limit=settings.top_k,
+            max_distance=settings.max_distance,
         )
 
     passages = [
@@ -209,7 +209,10 @@ async def main() -> int:
         print(f"{RED}KP_GROQ_API_KEY is not set: nothing to evaluate.{RESET}")
         return 2
 
-    print(f"model={settings.groq_model}  embeddings={settings.embedding_model}")
+    print(
+        f"model={settings.groq_model}  embeddings={settings.embedding_model}  "
+        f"max_distance={settings.max_distance}  top_k={settings.top_k}"
+    )
     print(f"{GREY}loading the embedding model...{RESET}")
     model = LocalEmbeddingModel.load(settings.embedding_model, settings.embedding_cache_dir)
 
@@ -222,7 +225,7 @@ async def main() -> int:
         try:
             await cleanup(factory, storage)  # in case a previous run was interrupted
             await ingest_fixtures(factory, model, storage)
-            outcomes = [await run_case(case, factory, model, llm) for case in CASES]
+            outcomes = [await run_case(case, factory, model, llm, settings) for case in CASES]
             code = report(outcomes)
         finally:
             await cleanup(factory, storage)

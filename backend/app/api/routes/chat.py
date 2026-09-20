@@ -13,11 +13,11 @@ import logging
 import anyio
 from fastapi import APIRouter, HTTPException, status
 
-from app.api.deps import CsrfProtected, Db, Llm, Model, Quota
+from app.api.deps import Config, CsrfProtected, Db, Llm, Model, Quota
 from app.core.quota import QuotaExceededError
 from app.db import vector_store
 from app.rag.embeddings import EmbeddingError, EmbeddingModel, embed_query
-from app.rag.generation import MAX_DISTANCE, TOP_K, Passage, answer_question
+from app.rag.generation import Passage, answer_question
 from app.rag.groq import LanguageModelError, QuotaExhaustedError
 from app.schemas.chat import ChatRequest, ChatResponse
 
@@ -37,6 +37,7 @@ async def ask(
     embeddings: Model,
     model: Llm,
     quota: Quota,
+    config: Config,
 ) -> ChatResponse:
     # 1. The owner. `sub` is the Keycloak subject: stable even when the user
     #    changes their email, and it is the only identity we ever trust,
@@ -66,11 +67,11 @@ async def ask(
         database,
         owner_id=owner_id,
         query_vector=vector,
-        limit=TOP_K,
+        limit=config.top_k,
         # A library always has a least-bad match. Without a ceiling, a question
         # about cooking would be answered from a passage about Kubernetes, with
         # a citation, and the citation would be real.
-        max_distance=MAX_DISTANCE,
+        max_distance=config.max_distance,
     )
 
     # 4. Nothing close enough - including the case of a user who has not

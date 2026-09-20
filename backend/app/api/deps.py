@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.config import Settings, get_settings
 from app.core.queue import JobQueue
 from app.core.quota import QuotaTracker
 from app.core.session import SessionData, SessionStore
@@ -14,6 +15,19 @@ from app.db.ingestion import DatabaseIngestionStore
 from app.rag.embeddings import EmbeddingModel
 from app.rag.generation import LanguageModel
 from app.rag.pipeline import IngestionStore
+
+
+def get_config() -> Settings:
+    """The settings, as a dependency rather than a module-level import.
+
+    `get_settings` is cached, so this costs nothing; what it buys is a test
+    that can override one value without touching the environment of the
+    whole process - which is how a retrieval threshold gets measured.
+    """
+    return get_settings()
+
+
+Config = Annotated[Settings, Depends(get_config)]
 
 
 def get_session_store(request: Request) -> SessionStore:

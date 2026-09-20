@@ -17,16 +17,40 @@ from dataclasses import dataclass
 
 from app.rag.parsing import ParsedDocument
 
-# One to two paragraphs: long enough to carry a complete idea, short enough for
+# One paragraph or so: long enough to carry a complete idea, short enough for
 # the embedding to stay specific. BGE-M3 accepts far more, but "the model
 # accepts it" and "retrieval stays precise" are two different limits.
-CHUNK_SIZE = 1000
+#
+# 600 rather than the original 1000, and the number is measured rather than
+# preferred. A real upload put an amendment, an energy rating and a phone
+# number on one page; at 1000 they landed in a single chunk whose vector was
+# their average, and a question about the phone number scored 0.630 against a
+# ceiling of 0.60. The answer was in the database and never came out.
+#
+#   size   chunks   best distance for that question
+#   1000     1        0.630   missed
+#    600     3        0.478   found, widest margin
+#    500     3        0.511   found
+#    400     3        0.490   found
+#    300     5        0.525   found, but worse than 600
+#
+# The curve has a minimum, which is the whole point: 300 is not better than
+# 600. Cutting too finely separates a sentence from the context that gives it
+# meaning, and the last chunk becomes an orphaned phone number. Too large
+# dilutes, too small fragments. There is no correct chunk size - only a
+# measured compromise for a given corpus, which is why the measurement is
+# written down here rather than the conclusion alone.
+#
+# Changing this invalidates every chunk already indexed. Existing documents
+# keep their old cut until they are re-indexed: see scripts/reindex.py.
+CHUNK_SIZE = 600
 
 # Insurance against a cut landing between a rule and its exception, which would
 # produce a wrong answer carrying a valid citation - the worst failure mode of
-# a RAG system, because nothing raises. 15% is cheap; 50% would double the
+# a RAG system, because nothing raises. Kept at the same share of the window,
+# so the protection did not shrink along with the chunk; 50% would double the
 # index and feed the model duplicated text.
-CHUNK_OVERLAP = 150
+CHUNK_OVERLAP = 100
 
 # Tried in order: cut on a boundary the author wrote rather than on an
 # arbitrary character. A paragraph break is a human saying "new idea here".

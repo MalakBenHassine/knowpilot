@@ -18,15 +18,21 @@ from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
-# Cosine distance above which a passage is simply not about the question.
-# This is the strongest guard in the whole feature, because it runs BEFORE the
-# model is called: there is nothing to hallucinate from if nothing was sent.
-MAX_DISTANCE = 0.6
-
-# How many passages reach the model. More context is not better: it dilutes
-# the question, costs quota, and pushes the instructions further from the end
-# of the prompt, where they carry the most weight.
-TOP_K = 5
+# The distance ceiling is NOT here. It is retrieval policy, it depends on the
+# documents a deployment holds, and it is the value most likely to be tuned
+# against the evaluation harness - so it lives in the settings and reaches the
+# retrieval call as an argument. Nothing in this module needs it: by the time
+# `answer_question` runs, the filtering has already happened.
+#
+# How many passages reach the model is retrieval policy too, and it lives in
+# the settings beside the distance ceiling. It moves with the chunk size: five
+# chunks of a thousand characters and eight of six hundred carry almost the
+# same context, and therefore almost the same token cost - which matters when
+# the whole service has about eighty-five questions a day.
+#
+# More context is not better on its own: it dilutes the question, costs quota,
+# and pushes the instructions further from the end of the prompt, where a model
+# weights them most.
 
 # A question longer than this is a paste, a mistake or an attack. Refusing it
 # at the boundary is cheaper than paying for it in tokens.
