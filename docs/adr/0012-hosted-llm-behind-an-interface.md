@@ -58,6 +58,33 @@ by number. It never receives a filename or a page, so an invented citation is
 not detected afterwards — it cannot be expressed. What the user sees as
 `contrat.pdf, p. 7` was attached by us after the answer came back.
 
+## The threat model for prompt injection, as measured
+
+Verified by hand against a document containing a paragraph written to capture
+a model that reads it.
+
+| The attacker tries to | Result |
+| --------------------- | ------ |
+| Make the assistant answer a planted value to **every** question | **Fails.** Unrelated questions are answered correctly from the legitimate passages |
+| Make it reveal its system prompt | **Fails.** The prompt is in no passage, so there is nothing to ground an answer in |
+| Make it repeat the planted value when **asked for it directly** | **Succeeds**, with a citation pointing at the poisoned paragraph |
+
+The third row is not a defect of this architecture, and treating it as one
+leads to the wrong fix. The assistant answers from the documents of the person
+asking; that person uploaded the file; tenant isolation means nobody else can
+retrieve it. The worst outcome is poisoning your own answers.
+
+The citation is what contains it. The source card quotes the absurd paragraph,
+so an answer that came from poison is visibly an answer that came from poison.
+An assistant without citations would have said the password and been believed.
+
+**This changes the day documents are shared between users.** A team workspace
+would let one member plant a sentence another member reads as fact, and that
+is a real attack: the content boundary would then cross an account boundary.
+Reopen this ADR before building shared collections - the mitigation would be
+provenance shown per passage, and untrusted-source marking, not a better
+prompt.
+
 ## Consequences
 
 - **The provider is a configuration value.** Changing it is a new class and one

@@ -6,6 +6,8 @@ client gets to choose, and every one of them would have to be validated,
 rate-limited or ignored. The safest input is the one that was never accepted.
 """
 
+import re
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from typing import Annotated, Protocol
@@ -63,12 +65,62 @@ class SourceChunk(Protocol):
     def text(self) -> str: ...
 
 
-def _snippet(text: str) -> str:
-    """Cut on a word boundary, so the quote does not end mid-syllable."""
+_SENTENCE = re.compile(r"(?<=[.;:!?])\s+")
+# Citation markers are stripped before the comparison. They are ours, not the
+# vocabulary of the answer, and the digit inside [1] happily matches a version
+# number or a date in the passage - biasing the quote towards a sentence that
+# has nothing to do with the question.
+_MARKER = re.compile(r"\[\d+\]")
+# Four letters or more: shorter tokens are articles and prepositions, which
+# every sentence shares and which therefore tell us nothing about which one
+# carries the evidence.
+_WORD = re.compile(r"[^\W\d_]{4,}|\d+", re.UNICODE)
+
+
+def _fold(text: str) -> str:
+    """Lowercase and strip accents, so remboursés matches rembourses.
+
+    A PDF text layer routinely loses accents that the model then restores in
+    its answer. Comparing the two without folding would find almost no overlap
+    on exactly the French documents this product is for.
+    """
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def _snippet(text: str, answer: str) -> str:
+    """Quote the part of the passage the answer actually came from.
+
+    Found by testing by hand, and obvious in hindsight: taking the first 240
+    characters showed the title of the document for a question about holidays.
+    The snippet exists for one reason - letting a reader check the answer
+    without opening the file - and a snippet that does not show the evidence
+    serves no purpose at all.
+
+    The sentences are scored against the ANSWER rather than the question,
+    because an answer paraphrases its source and therefore shares far more
+    vocabulary with it than a question does. No model call, no embedding: word
+    overlap is enough to pick a sentence out of five.
+    """
     if len(text) <= SNIPPET_CHARACTERS:
         return text
-    cut = text.rfind(" ", 0, SNIPPET_CHARACTERS)
-    return text[: cut if cut > 0 else SNIPPET_CHARACTERS].rstrip() + "..."
+
+    sentences = [part.strip() for part in _SENTENCE.split(text) if part.strip()]
+    wanted = set(_WORD.findall(_fold(_MARKER.sub(" ", answer))))
+
+    start = 0
+    if sentences and wanted:
+        scores = [len(wanted & set(_WORD.findall(_fold(s)))) for s in sentences]
+        start = scores.index(max(scores))
+
+    window = " ".join(sentences[start:])[:SNIPPET_CHARACTERS] if sentences else text
+    # Cut on a word boundary, so the quote does not end mid-syllable.
+    if len(window) >= SNIPPET_CHARACTERS:
+        cut = window.rfind(" ")
+        window = window[: cut if cut > 0 else SNIPPET_CHARACTERS].rstrip() + "..."
+    # An ellipsis in front says the quote starts mid-passage, so a reader is
+    # never left thinking the document begins here.
+    return ("..." + window) if start else window
 
 
 class CitationResponse(BaseModel):
@@ -122,7 +174,7 @@ class ChatResponse(BaseModel):
                     document_id=sources[citation.number - 1].document_id,
                     filename=citation.filename,
                     page_number=citation.page_number,
-                    snippet=_snippet(sources[citation.number - 1].text),
+                    snippet=_snippet(sources[citation.number - 1].text, answer.text),
                 )
                 for citation in answer.citations
             ],
