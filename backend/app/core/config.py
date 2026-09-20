@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote_plus
 
-from pydantic import field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -76,6 +76,40 @@ class Settings(BaseSettings):
     # models this account cannot reach, so this value was chosen from the
     # models endpoint queried with the real key.
     groq_model: str = "openai/gpt-oss-120b"
+
+    # --- Daily question budgets (ADR-0012) ---
+    # Policy, not logic, which is why it lives here rather than as a constant
+    # in the module that enforces it. The same code runs on a laptop with one
+    # user, on a demo with a handful, and in production; only these two numbers
+    # differ, and recompiling to change a number is not a deployment strategy.
+    #
+    # Defaults are derived: 200K provider tokens a day over roughly 2300 per
+    # question leaves about 85, and the service stops at 80 so the last few are
+    # spare. Four users can then spend their whole allowance on the same day.
+    #
+    # Found by using the product: on a single-user instance the per-user limit
+    # binds at 20 while 60 questions of the service budget sit unreachable.
+    # Fairness that protects nobody is only a smaller budget.
+    daily_questions_per_user: int = Field(default=20, gt=0)
+    daily_questions_per_service: int = Field(default=80, gt=0)
+
+    @model_validator(mode="after")
+    def _budgets_are_coherent(self) -> "Settings":
+        """A per-user limit above the service limit can never be reached.
+
+        Nothing would break: the service counter would simply refuse first, and
+        every user would read "the service has used its questions" instead of
+        "you have used yours". The misconfiguration would be invisible except
+        as a confusing message, which is exactly the kind of thing that must
+        fail at startup, in front of whoever is deploying.
+        """
+        if self.daily_questions_per_user > self.daily_questions_per_service:
+            raise ValueError(
+                f"KP_DAILY_QUESTIONS_PER_USER ({self.daily_questions_per_user}) exceeds "
+                f"KP_DAILY_QUESTIONS_PER_SERVICE ({self.daily_questions_per_service}): "
+                "the per-user limit could never be reached"
+            )
+        return self
 
     @field_validator("groq_api_key", "groq_model", mode="after")
     @classmethod

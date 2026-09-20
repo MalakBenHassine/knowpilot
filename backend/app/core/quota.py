@@ -30,17 +30,12 @@ from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 
-# 200K tokens a day over roughly 2300 tokens a question leaves about 85. The
-# service stops at 80 so that the last few are spare: hitting our own limit
-# produces a clear message, hitting the provider limit produces a 429 we have
-# to interpret.
-DAILY_QUESTIONS_PER_SERVICE = 80
-
-# Four users can spend their whole allowance on the same day without exhausting
-# the service. Deliberately generous: a quota that bites during normal use
-# teaches people to distrust the product.
-DAILY_QUESTIONS_PER_USER = 20
-
+# The two limits are NOT here. They are policy - a laptop, a demo and
+# production want different numbers - so they live in the settings, and this
+# module receives them. Keeping them as constants meant recompiling to change
+# a number, which is not a deployment strategy; the embedding model name is
+# configuration for exactly the same reason.
+#
 # Cleanup only. The day is already part of the key name, so yesterday counters
 # are never read again; the TTL simply stops them accumulating in memory.
 KEY_TTL_SECONDS = 2 * 24 * 60 * 60
@@ -80,13 +75,11 @@ class QuotaTracker:
     DECR. Of two defects, take the reversible one.
     """
 
-    def __init__(
-        self,
-        redis: Redis,
-        *,
-        per_user: int = DAILY_QUESTIONS_PER_USER,
-        per_service: int = DAILY_QUESTIONS_PER_SERVICE,
-    ) -> None:
+    def __init__(self, redis: Redis, *, per_user: int, per_service: int) -> None:
+        # Keyword-only and with no defaults, like every owner in this codebase.
+        # A default here would be a policy decision hidden in a library: a
+        # caller that forgot to pass the configured value would silently get
+        # somebody else numbers, and nothing would ever say so.
         self._redis = redis
         self._per_user = per_user
         self._per_service = per_service

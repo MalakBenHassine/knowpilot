@@ -95,7 +95,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Counters live in Redis, so every worker and every replica spends from
     # the same daily budget. Four processes with four dictionaries would
     # allow four times the quota, which is the failure this prevents.
-    app.state.quota = QuotaTracker(redis)
+    app.state.quota = QuotaTracker(
+        redis,
+        per_user=settings.daily_questions_per_user,
+        per_service=settings.daily_questions_per_service,
+    )
 
     # One HTTP client for the whole process, not one per request: each new
     # client means a fresh TCP connection and a fresh TLS handshake, paid on

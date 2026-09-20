@@ -13,7 +13,9 @@ from datetime import UTC, datetime
 
 import anyio
 import pytest
+from pydantic import ValidationError
 
+from app.core.config import Settings
 from app.core.quota import (
     KEY_TTL_SECONDS,
     QuotaExceededError,
@@ -259,6 +261,37 @@ def test_the_reset_delay_is_never_zero() -> None:
 
 
 # --- The tenant-isolation convention -------------------------------------
+
+
+def test_the_limits_have_no_default() -> None:
+    """The tracker must be told the policy, never assume one.
+
+    A default here would be a policy decision hidden inside a library: a caller
+    that forgot to pass the configured value would silently enforce somebody
+    else numbers, and nothing would ever say so.
+    """
+    with pytest.raises(TypeError):
+        QuotaTracker(FakeRedis())  # type: ignore[call-arg,arg-type]
+
+
+def test_a_per_user_limit_above_the_service_one_is_refused_at_startup() -> None:
+    """Nothing would break - which is precisely the problem.
+
+    The service counter would simply refuse first, and every user would read
+    "the service has used its questions" instead of "you have used yours". An
+    invisible misconfiguration is one that fails in front of whoever is
+    deploying, not at three in the morning.
+    """
+    with pytest.raises(ValidationError):
+        Settings(daily_questions_per_user=100, daily_questions_per_service=80)
+
+
+def test_a_zero_budget_is_refused() -> None:
+    # Answering is disabled by leaving the API key empty, which produces an
+    # honest 503. A budget of zero would instead look like a quota anybody can
+    # hit on their first question of the day.
+    with pytest.raises(ValidationError):
+        Settings(daily_questions_per_user=0)
 
 
 def test_the_owner_cannot_be_passed_positionally() -> None:
