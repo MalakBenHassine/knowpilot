@@ -212,6 +212,24 @@ def parse_pdf(path: Path, ocr: OcrEngine | None = None) -> ParsedDocument:
         if text:
             pages.append(ParsedPage(number=number, text=text, source=source))
 
+    # A document-level threshold hides a page-level problem: four pages of
+    # which three are pictures still passes, because the one readable page
+    # carries enough characters. The document is then declared ready while most
+    # of it is unreachable, and the assistant honestly answers "not found"
+    # about a page the user can see. Until an OCR engine is plugged into the
+    # protocol above, the least we owe is a loud line in the logs.
+    unreadable = total_pages - len(pages)
+    if unreadable and unreadable * 2 >= total_pages:
+        logger.warning(
+            "%s of %s pages produced no text in %s; most of this document is "
+            "not searchable. An OCR engine would recover them.",
+            unreadable,
+            total_pages,
+            # The generated identifier, never the name the user chose: a
+            # filename is attacker-controlled and has no place in a log line.
+            path.name,
+        )
+
     document = ParsedDocument(pages=pages, page_count=total_pages)
     if len(document.text) < MIN_CHARACTERS_PER_DOCUMENT:
         raise NoTextFoundError("no usable text, even after ocr")

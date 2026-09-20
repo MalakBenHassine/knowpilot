@@ -4,6 +4,7 @@ The OCR engine is faked: a real Tesseract would make these tests slow,
 non-deterministic, and impossible to break on purpose.
 """
 
+import logging
 from io import BytesIO
 from pathlib import Path
 
@@ -211,3 +212,33 @@ def test_parse_document_rejects_an_unsupported_type(tmp_path: Path) -> None:
 
     with pytest.raises(UnsupportedFormatError):
         parse_document(path, "application/zip")
+
+
+def test_a_mostly_unreadable_document_says_so_in_the_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Found on a real upload: four pages, three of them pictures.
+
+    The document passed every check - one readable page carried more than
+    MIN_CHARACTERS_PER_DOCUMENT - and was reported as fully indexed while three
+    quarters of it were unreachable. A document-level threshold cannot see a
+    page-level problem, so until OCR is wired in, the logs must say it out loud.
+    """
+    path = tmp_path / "mixed.pdf"
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer)
+    pdf.drawString(50, 750, "Une seule page lisible. " * 8)
+    pdf.showPage()
+    for _ in range(3):  # three pages with nothing on them at all
+        pdf.showPage()
+    pdf.save()
+    path.write_bytes(buffer.getvalue())
+
+    with caplog.at_level(logging.WARNING, logger="app.rag.parsing"):
+        document = parse_pdf(path)
+
+    assert document.page_count == 4
+    assert len(document.pages) == 1
+    assert "3 of 4 pages produced no text" in caplog.text
+    # The generated identifier, never the name the user chose.
+    assert "mixed.pdf" in caplog.text
