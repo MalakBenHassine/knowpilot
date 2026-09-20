@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file="../.env", env_prefix="KP_", extra="ignore")
 
     environment: Literal["local", "ci", "production"] = "local"
+    # Applies to our own loggers only; libraries stay at WARNING.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     # Public name of the service; never includes a version (see contract.md).
     service_name: str = "knowpilot-api"
 

@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from app.api.routes import auth, documents, health
 from app.core.config import get_settings
+from app.core.logging import configure_logging
 from app.core.oidc import OidcClient
 from app.core.session import SessionStore
 from app.core.storage import FileStorage
@@ -16,6 +17,9 @@ from app.db.session import create_engine, create_session_factory
 from app.rag.model import LocalEmbeddingModel
 
 settings = get_settings()
+# Before anything else: a module that logs during import would otherwise write
+# into a void.
+configure_logging(settings.log_level)
 
 
 @asynccontextmanager

@@ -127,8 +127,19 @@ async def upload_document(
         storage.delete(document_id)
         raise
 
-    # 6. Scheduled after the response, and given its own persistence: by then
-    #    the request session is closed and this transaction is committed.
+    # 6. Committed HERE, explicitly, before the task is scheduled.
+    #
+    #    Starlette runs background tasks BEFORE the exit code of dependencies
+    #    with yield - verified, not assumed, by tests/test_framework.py. The
+    #    task opens its own connection, so without this commit it would look
+    #    for a row that no other connection can see yet, find nothing, and
+    #    return silently. The document would stay `processing` for ever.
+    #
+    #    This is also why the task must own its persistence rather than borrow
+    #    the request session: by the time it runs, that session is on its way
+    #    out.
+    await database.commit()
+
     background.add_task(
         ingest_document,
         store,
@@ -165,9 +176,10 @@ async def delete_document(
 
     # The chunks are gone with the row, by ON DELETE CASCADE, in this very
     # transaction. The file cannot join that transaction - a filesystem has no
-    # rollback - so it is removed AFTER the response, which means after the
-    # commit. Deleting it here would risk erasing the bytes of a document whose
-    # deletion was then rolled back, leaving a row pointing at nothing.
+    # rollback - so the deletion is committed FIRST and only then are the bytes
+    # removed. Scheduling the removal without committing would delete the file
+    # before the row was final: background tasks run before dependencies exit.
+    await database.commit()
     background.add_task(storage.delete, document_id)
 
     # 204: there is nothing sensible to return, and an empty body is not JSON.
@@ -205,6 +217,9 @@ async def retry_document(
         raise HTTPException(status.HTTP_409_CONFLICT, "This document cannot be retried")
 
     await repository.reset_for_retry(database, document_id=document_id)
+    # Same ordering trap as the upload: the task runs before the dependency
+    # commits, and would re-read the old failed state.
+    await database.commit()
     background.add_task(
         ingest_document,
         store,
