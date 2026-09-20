@@ -120,6 +120,53 @@ def test_a_citation_repeated_is_listed_once() -> None:
     assert len(answer.citations) == 1
 
 
+# --- The shapes a model actually writes ----------------------------------
+
+
+def test_fullwidth_brackets_are_understood() -> None:
+    """The first real question this feature ever answered, and it was lost.
+
+    The model replied correctly and cited its sources - with fullwidth
+    brackets. The answer was true, grounded and verifiable, and our own parser
+    threw it away, producing a refusal indistinguishable from an honest one.
+
+    The reply below is the exact text that came back from the provider.
+    """
+    reply = (
+        "Malak maitrise les technologies DevOps suivantes : Docker, Jenkins, "
+        "GitLab CI/CD, SonarQube, Nexus, Trivy【1】【2】."
+    )
+
+    answer = ask(FakeModel(reply), passages(2))
+
+    assert answer.is_grounded is True
+    assert [citation.number for citation in answer.citations] == [1, 2]
+
+
+def test_the_answer_shown_to_the_user_uses_ascii_brackets() -> None:
+    """Otherwise the text says [1] and the source list says something else.
+
+    Normalising for parsing but showing the original would let the two drift
+    apart on screen, which is exactly the kind of inconsistency that makes a
+    citation look unreliable.
+    """
+    answer = ask(FakeModel("Docker【1】."), passages(2))
+
+    assert "[1]" in answer.text
+    assert "【" not in answer.text
+
+
+def test_a_real_refusal_is_still_a_refusal() -> None:
+    """The fix must not turn every answer into a grounded one.
+
+    Widening what counts as a citation is exactly the kind of change that
+    quietly disables a guard, so the guard is re-checked here.
+    """
+    answer = ask(FakeModel("Docker et Jenkins, sans aucune source."), passages(2))
+
+    assert answer.is_grounded is False
+
+
 # --- What the model is allowed to see -----------------------------------
 
 
