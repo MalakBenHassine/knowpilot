@@ -5,6 +5,8 @@ test needs. What is exercised is everything around it - the guards that decide
 whether an answer is allowed to reach the user at all.
 """
 
+import logging
+
 import anyio
 import pytest
 
@@ -154,6 +156,31 @@ def test_the_answer_shown_to_the_user_uses_ascii_brackets() -> None:
 
     assert "[1]" in answer.text
     assert "【" not in answer.text
+
+
+def test_a_refusal_in_the_models_own_words_is_not_alarming(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Found in production, in a log line I had written the day before.
+
+    The model refused in French instead of returning the exact token, the
+    third guard caught it, and the user saw the right card - the system
+    working. The log called it "answer dropped" at WARNING, which reads like a
+    bug. Length is what separates the two cases.
+    """
+    with caplog.at_level(logging.INFO, logger="app.rag.generation"):
+        answer = ask(FakeModel("Les passages ne le precisent pas."), passages(2))
+
+    assert answer.is_grounded is False
+    assert [record.levelno for record in caplog.records] == [logging.INFO]
+
+
+def test_a_long_answer_with_no_source_is_alarming(caplog: pytest.LogCaptureFixture) -> None:
+    """The case worth waking up for: assertions sourced nowhere."""
+    with caplog.at_level(logging.INFO, logger="app.rag.generation"):
+        ask(FakeModel("Malak maitrise Docker et Jenkins. " * 8), passages(2))
+
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
 
 
 def test_a_real_refusal_is_still_a_refusal() -> None:

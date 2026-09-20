@@ -36,6 +36,13 @@ MAX_QUESTION_CHARACTERS = 1000
 # the question. Checked in code, because being asked is not being obliged.
 REFUSAL = "INSUFFICIENT_EVIDENCE"
 
+# Below this, an answer with no citation is the model refusing in its own words
+# rather than with the token we asked for - "the passages do not say" is a
+# refusal, however it is phrased. Above it, an uncited answer is the model
+# asserting things it sourced nowhere, which is the event worth waking up for.
+# Measured on a real refusal: thirty-one characters.
+UNCITED_REFUSAL_CHARACTERS = 120
+
 SYSTEM_PROMPT = f"""You answer questions about the private documents of one user.
 
 Rules, in order of importance:
@@ -179,14 +186,21 @@ async def answer_question(question: str, passages: list[Passage], model: Languag
     # confident it sounds.
     numbers = _valid_citations(raw, len(passages))
     if not numbers:
-        # Logged, because this refusal and an honest one look identical to a
-        # user and are completely different events to us: the model may have
+        # Logged, because this outcome and an honest refusal look identical to
+        # a user and are completely different events to us: the model may have
         # answered perfectly in a shape we failed to read. Without this line
         # the two are indistinguishable, and such a bug lives for months.
         #
-        # The SHAPE is logged and never the text: an answer quotes the private
+        # The LENGTH is what separates them, which the first version of this
+        # log missed. A short uncited reply is the model refusing in its own
+        # words instead of the exact token we asked for - expected, and this
+        # guard catching it is the system working. A LONG uncited reply is the
+        # alarming one: the model asserted things and sourced none of them.
+        #
+        # The shape is logged and never the text: an answer quotes the private
         # documents of a user, and a log is a file that travels.
-        logger.warning(
+        logger.log(
+            logging.WARNING if len(raw) > UNCITED_REFUSAL_CHARACTERS else logging.INFO,
             "answer dropped for want of a usable citation: %s characters, "
             "%s bracketed token(s), %s passage(s) sent",
             len(raw),
