@@ -5,6 +5,7 @@ description = "KnowPilot API: authentication (BFF), document ingestion and groun
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.20.0",
+    "arq>=0.25.0",
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.141.1",
     "joserfc>=1.7.5",

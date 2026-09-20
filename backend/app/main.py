@@ -12,6 +12,7 @@ from app.api.routes import auth, chat, documents, health
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.oidc import OidcClient
+from app.core.queue import ArqJobQueue, create_queue
 from app.core.quota import QuotaTracker
 from app.core.session import SessionStore
 from app.core.storage import FileStorage
@@ -85,6 +86,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         health.READINESS_CHECKS["embeddings"] = embeddings_ready
 
+    # A second Redis connection, on purpose: arq speaks its own protocol on
+    # its own keys, and sharing the session pool would tie the lifetime of
+    # logins to the lifetime of a job queue.
+    queue_pool = await create_queue(settings.redis_url)
+    app.state.job_queue = ArqJobQueue(queue_pool)
+
     # Counters live in Redis, so every worker and every replica spends from
     # the same daily budget. Four processes with four dictionaries would
     # allow four times the quota, which is the failure this prevents.
@@ -122,6 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     health.READINESS_CHECKS.pop("database", None)
     health.READINESS_CHECKS.pop("cache", None)
     await http_client.aclose()
+    await queue_pool.aclose()
     await engine.dispose()
     await redis.aclose()
 

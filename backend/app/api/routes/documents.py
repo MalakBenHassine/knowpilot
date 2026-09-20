@@ -12,7 +12,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Response, UploadFile, status
 from sqlalchemy.exc import IntegrityError
 
-from app.api.deps import CsrfProtected, CurrentSession, Db, Ingestion, Model, Storage
+from app.api.deps import CsrfProtected, CurrentSession, Db, Queue, Storage
 from app.core.storage import (
     READ_CHUNK_BYTES,
     SNIFF_BYTES,
@@ -25,7 +25,6 @@ from app.core.storage import (
 )
 from app.db import documents as repository
 from app.db import vector_store
-from app.rag.pipeline import ingest_document
 from app.schemas.document import DocumentListResponse, DocumentResponse
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -62,9 +61,7 @@ async def upload_document(
     session: CsrfProtected,
     database: Db,
     storage: Storage,
-    model: Model,
-    store: Ingestion,
-    background: BackgroundTasks,
+    queue: Queue,
     file: Annotated[UploadFile, File()],
 ) -> DocumentResponse:
     """Accept a file, store it, and index it in the background.
@@ -140,13 +137,11 @@ async def upload_document(
     #    out.
     await database.commit()
 
-    background.add_task(
-        ingest_document,
-        store,
-        model,
-        document_id=document_id,
-        owner_id=session.sub,
-    )
+    # 7. Publish the intention rather than do the work. The job is a durable
+    #    fact in Redis, picked up by a separate worker process, so a long
+    #    document no longer holds CPU away from somebody asking a question,
+    #    and a restart during ingestion resumes instead of losing the work.
+    await queue.enqueue_ingestion(document_id=document_id, owner_id=session.sub)
 
     return DocumentResponse.of(document)
 
@@ -194,9 +189,7 @@ async def delete_document(
 async def retry_document(
     session: CsrfProtected,
     database: Db,
-    model: Model,
-    store: Ingestion,
-    background: BackgroundTasks,
+    queue: Queue,
     document_id: uuid.UUID,
 ) -> DocumentResponse:
     """Run the pipeline again on a document that failed for a passing reason.
@@ -217,14 +210,10 @@ async def retry_document(
         raise HTTPException(status.HTTP_409_CONFLICT, "This document cannot be retried")
 
     await repository.reset_for_retry(database, document_id=document_id)
-    # Same ordering trap as the upload: the task runs before the dependency
-    # commits, and would re-read the old failed state.
+    # Committed before the job is published, for the same reason as the
+    # upload and now for a sharper one: a worker in another process can pick
+    # the job up microseconds later, and it would read the old failed state
+    # from its own connection.
     await database.commit()
-    background.add_task(
-        ingest_document,
-        store,
-        model,
-        document_id=document_id,
-        owner_id=session.sub,
-    )
+    await queue.enqueue_ingestion(document_id=document_id, owner_id=session.sub)
     return DocumentResponse.of(document)

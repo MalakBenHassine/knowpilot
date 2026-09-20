@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.queue import JobQueue
 from app.core.quota import QuotaTracker
 from app.core.session import SessionData, SessionStore
 from app.core.storage import FileStorage
@@ -42,6 +43,15 @@ def get_embedding_model(request: Request) -> EmbeddingModel:
 
 
 Model = Annotated[EmbeddingModel, Depends(get_embedding_model)]
+
+
+def get_job_queue(request: Request) -> JobQueue:
+    """Publishes ingestion jobs. The route never learns who consumes them."""
+    queue: JobQueue = request.app.state.job_queue
+    return queue
+
+
+Queue = Annotated[JobQueue, Depends(get_job_queue)]
 
 
 def get_language_model(request: Request) -> LanguageModel:

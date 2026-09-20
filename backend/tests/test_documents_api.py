@@ -20,9 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (
     current_session,
     db_session,
-    get_embedding_model,
     get_file_storage,
-    get_ingestion_store,
+    get_job_queue,
     require_csrf,
 )
 from app.core.session import SessionData
@@ -30,7 +29,6 @@ from app.core.storage import FileStorage
 from app.db.documents import create_document, mark_failed, mark_ready
 from app.main import app
 from tests.conftest import requires_database
-from tests.test_pipeline import FakeModel, FakeStore
 
 ALICE = "alice-sub-0001"
 BOB = "bob-sub-0002"
@@ -54,15 +52,31 @@ def signed_in_as(sub: str) -> SessionData:
     )
 
 
+class FakeQueue:
+    """Records what was published, and runs nothing.
+
+    Ingestion now happens in another process, so these tests can no longer
+    observe it by watching a pipeline run. That is an improvement, not a
+    loss: what the endpoint owes its caller is that the job was published
+    AFTER the row was committed. Whether a worker succeeds is the subject
+    of the pipeline tests, and belongs there.
+    """
+
+    def __init__(self) -> None:
+        self.jobs: list[tuple[uuid.UUID, str]] = []
+
+    async def enqueue_ingestion(self, *, document_id: uuid.UUID, owner_id: str) -> None:
+        self.jobs.append((document_id, owner_id))
+
+
 @pytest.fixture
-def indexing() -> FakeStore:
-    """Stands in for the background pipeline, and records that it ran."""
-    return FakeStore(None)
+def indexing() -> FakeQueue:
+    return FakeQueue()
 
 
 @pytest.fixture
 async def client(
-    session: AsyncSession, tmp_path: Path, indexing: FakeStore
+    session: AsyncSession, tmp_path: Path, indexing: FakeQueue
 ) -> AsyncIterator[AsyncClient]:
     """The real application, with its edges replaced.
 
@@ -78,8 +92,7 @@ async def client(
     app.dependency_overrides[current_session] = lambda: signed_in_as(ALICE)
     app.dependency_overrides[require_csrf] = lambda: signed_in_as(ALICE)
     app.dependency_overrides[get_file_storage] = lambda: FileStorage(tmp_path)
-    app.dependency_overrides[get_embedding_model] = FakeModel
-    app.dependency_overrides[get_ingestion_store] = lambda: indexing
+    app.dependency_overrides[get_job_queue] = lambda: indexing
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -171,7 +184,7 @@ async def test_an_anonymous_caller_is_refused(session: AsyncSession) -> None:
 
 
 async def test_an_upload_is_accepted_immediately_as_processing(
-    client: AsyncClient, indexing: FakeStore
+    client: AsyncClient, indexing: FakeQueue
 ) -> None:
     response = await client.post("/api/documents", **upload(TEXT))
 
@@ -184,9 +197,9 @@ async def test_an_upload_is_accepted_immediately_as_processing(
     assert body["stage"] == "parsing"
     assert body["mime_type"] == "text/plain"
     assert body["size_bytes"] == len(TEXT)
-    # And the background task really was scheduled, and really ran - after the
-    # response, with its own persistence rather than the request session.
-    assert indexing.load_calls == 1
+    # The job really was published, and carries the owner: a worker that
+    # had to look the owner up would be one more place to forget it.
+    assert indexing.jobs == [(uuid.UUID(body["id"]), ALICE)]
 
 
 async def test_a_type_we_do_not_read_is_refused_before_anything_is_written(
@@ -288,7 +301,7 @@ async def test_deleting_something_that_never_existed_is_the_same_404(
 
 
 async def test_a_retryable_failure_can_be_retried(
-    client: AsyncClient, session: AsyncSession, indexing: FakeStore
+    client: AsyncClient, session: AsyncSession, indexing: FakeQueue
 ) -> None:
     document_id = await add(session, ALICE, "contract.pdf")
     await mark_failed(session, document_id=document_id, reason="processing_error", retryable=True)
@@ -297,7 +310,7 @@ async def test_a_retryable_failure_can_be_retried(
 
     # 202 Accepted, not 200: the work is scheduled, not finished.
     assert response.status_code == 202
-    assert indexing.load_calls == 1
+    assert len(indexing.jobs) == 1
     listed = (await client.get("/api/documents")).json()["items"][0]
     assert listed["status"] == "processing"
     assert listed["failure_reason"] is None
@@ -306,7 +319,7 @@ async def test_a_retryable_failure_can_be_retried(
 
 
 async def test_a_permanent_failure_cannot_be_retried(
-    client: AsyncClient, session: AsyncSession, indexing: FakeStore
+    client: AsyncClient, session: AsyncSession, indexing: FakeQueue
 ) -> None:
     document_id = await add(session, ALICE, "scan.pdf")
     await mark_failed(session, document_id=document_id, reason="no_text_found", retryable=False)
@@ -317,7 +330,7 @@ async def test_a_permanent_failure_cannot_be_retried(
     # simply makes no sense for its state. A scan will not become readable
     # because it is asked a second time.
     assert response.status_code == 409
-    assert indexing.load_calls == 0
+    assert indexing.jobs == []
 
 
 async def test_retrying_the_document_of_another_user_is_a_404(

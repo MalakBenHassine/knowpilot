@@ -1,0 +1,124 @@
+"""The ingestion worker: a second process, running the same pipeline.
+
+Started with `arq app.worker.WorkerSettings`. It shares the database, the
+Redis instance and the uploads volume with the API, and shares no event loop
+with it - which is the entire point. A long document now competes with other
+ingestions, never with somebody waiting for an answer.
+
+Nothing in `app/rag/pipeline.py` changed to make this possible. The pipeline
+already took an `IngestionStore` and an `EmbeddingModel` rather than reaching
+for a database or a model of its own, so moving it into another process was a
+matter of building those two objects somewhere else.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import TYPE_CHECKING, Any, cast
+
+from arq import func
+from arq.connections import RedisSettings
+
+from app.core.config import get_settings
+from app.core.logging import configure_logging
+from app.core.queue import INGEST_JOB
+from app.db.ingestion import DatabaseIngestionStore
+from app.db.models import EMBEDDING_DIMENSIONS
+from app.db.session import create_engine, create_session_factory
+from app.rag.model import LocalEmbeddingModel
+from app.rag.pipeline import ingest_document
+
+if TYPE_CHECKING:
+    from arq.typing import WorkerCoroutine
+
+logger = logging.getLogger(__name__)
+
+settings = get_settings()
+configure_logging(settings.log_level)
+
+# One document at a time. The work is CPU-bound, so running four in parallel on
+# a shared vCPU finishes all four later than running them one after another -
+# and holds four documents worth of tensors in memory to do it. Concurrency
+# helps when tasks wait; these do not.
+MAX_CONCURRENT_JOBS = 1
+
+# Ten minutes, derived rather than guessed: the ceiling is 500 pages, OCR is
+# capped at 30 of them, and embedding a long document is measured in tens of
+# seconds. A job that exceeds this is stuck, not slow.
+JOB_TIMEOUT_SECONDS = 600
+
+# Retried by arq if the worker dies mid-job, which is exactly the loss the
+# queue exists to prevent. Expected failures never reach this: the pipeline
+# catches them and writes a failure_reason instead of raising.
+MAX_TRIES = 2
+
+
+async def ingest(context: dict[str, Any], document_id: str, owner_id: str) -> None:
+    """Run the pipeline for one document.
+
+    The pipeline never raises, so a job that ends without an exception says
+    nothing about whether the document succeeded - that verdict is in the
+    database, where the interface reads it.
+    """
+    await ingest_document(
+        context["store"],
+        context["model"],
+        document_id=uuid.UUID(document_id),
+        owner_id=owner_id,
+    )
+
+
+async def startup(context: dict[str, Any]) -> None:
+    """Build the database and the model once, not once per job.
+
+    Loading BGE-M3 costs roughly twenty seconds and 2.2 GB. Paying that per job
+    would make a five-second ingestion take half a minute, and a burst of
+    uploads would spend most of its time loading the same weights again.
+    """
+    engine = create_engine(settings.database_url)
+    context["engine"] = engine
+    context["store"] = DatabaseIngestionStore(create_session_factory(engine))
+
+    model = LocalEmbeddingModel.load(settings.embedding_model, settings.embedding_cache_dir)
+    # The column is vector(1024). A worker writing a different width would
+    # produce rows PostgreSQL rejects, or worse, vectors nobody can compare.
+    # Fail here rather than halfway through an upload.
+    if model.dimensions != EMBEDDING_DIMENSIONS:
+        raise RuntimeError(
+            f"{model.name} produces {model.dimensions} dimensions, "
+            f"but the schema stores {EMBEDDING_DIMENSIONS}."
+        )
+    context["model"] = model
+    logger.info("ingestion worker ready with %s", model.name)
+
+
+async def shutdown(context: dict[str, Any]) -> None:
+    await context["engine"].dispose()
+
+
+class WorkerSettings:
+    """Read by the `arq` command line. Plain attributes, no framework magic."""
+
+    # arq declares its job type as (ctx, *args, **kwargs), which every
+    # concretely typed function fails to match. Adopting that signature to
+    # satisfy the checker would throw away the typing of our own job, so the
+    # cast states the intent instead: `ingest` is deliberately narrower than
+    # what arq accepts, and the enqueue site is the only caller.
+    functions = [
+        func(
+            cast("WorkerCoroutine", ingest),
+            name=INGEST_JOB,
+            timeout=JOB_TIMEOUT_SECONDS,
+            max_tries=MAX_TRIES,
+        )
+    ]
+    on_startup = startup
+    on_shutdown = shutdown
+    redis_settings = RedisSettings.from_dsn(settings.redis_url)
+    max_jobs = MAX_CONCURRENT_JOBS
+    # Results are kept only long enough to be useful in the logs. The real
+    # record of what happened to a document is the document row itself, so
+    # keeping job results for days would duplicate the truth and let the two
+    # disagree.
+    keep_result = 300
