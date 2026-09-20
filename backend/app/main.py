@@ -1,19 +1,23 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from redis.asyncio import Redis
 from sqlalchemy import text
 
-from app.api.routes import auth, documents, health
+from app.api.routes import auth, chat, documents, health
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.oidc import OidcClient
+from app.core.quota import QuotaTracker
 from app.core.session import SessionStore
 from app.core.storage import FileStorage
 from app.db.models import EMBEDDING_DIMENSIONS
 from app.db.session import create_engine, create_session_factory
+from app.rag.groq import GroqLanguageModel
 from app.rag.model import LocalEmbeddingModel
 
 settings = get_settings()
@@ -81,12 +85,43 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         health.READINESS_CHECKS["embeddings"] = embeddings_ready
 
+    # Counters live in Redis, so every worker and every replica spends from
+    # the same daily budget. Four processes with four dictionaries would
+    # allow four times the quota, which is the failure this prevents.
+    app.state.quota = QuotaTracker(redis)
+
+    # One HTTP client for the whole process, not one per request: each new
+    # client means a fresh TCP connection and a fresh TLS handshake, paid on
+    # every question. Closed below, in reverse order of construction.
+    http_client = httpx.AsyncClient()
+    app.state.language_model = None
+    if settings.generation_enabled:
+        app.state.language_model = GroqLanguageModel(
+            settings.groq_api_key, settings.groq_model, http_client
+        )
+
+        async def generation_ready() -> bool:
+            # Deliberately NOT a call to the provider: a readiness probe runs
+            # every few seconds, and spending the daily budget to prove the
+            # budget exists would be its own outage.
+            return app.state.language_model is not None
+
+        health.READINESS_CHECKS["generation"] = generation_ready
+    else:
+        # Loud, because the symptom - every question answered with a 503 -
+        # looks like a provider outage rather than a missing variable.
+        logging.getLogger("app").warning(
+            "KP_GROQ_API_KEY is not set: answering is disabled, uploads still work"
+        )
+
     yield
 
     # Torn down in the reverse order of construction.
+    health.READINESS_CHECKS.pop("generation", None)
     health.READINESS_CHECKS.pop("embeddings", None)
     health.READINESS_CHECKS.pop("database", None)
     health.READINESS_CHECKS.pop("cache", None)
+    await http_client.aclose()
     await engine.dispose()
     await redis.aclose()
 
@@ -106,3 +141,4 @@ app = FastAPI(
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")

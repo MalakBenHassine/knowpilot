@@ -6,10 +6,12 @@ from typing import Annotated
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.quota import QuotaTracker
 from app.core.session import SessionData, SessionStore
 from app.core.storage import FileStorage
 from app.db.ingestion import DatabaseIngestionStore
 from app.rag.embeddings import EmbeddingModel
+from app.rag.generation import LanguageModel
 from app.rag.pipeline import IngestionStore
 
 
@@ -40,6 +42,32 @@ def get_embedding_model(request: Request) -> EmbeddingModel:
 
 
 Model = Annotated[EmbeddingModel, Depends(get_embedding_model)]
+
+
+def get_language_model(request: Request) -> LanguageModel:
+    """The configured provider, or 503.
+
+    None means no API key was configured. Answering 503 keeps the rest of
+    the application alive: uploads, listings and deletions have nothing to
+    do with generation, and an optional external service must never be able
+    to take the whole product down with it.
+    """
+    model: LanguageModel | None = request.app.state.language_model
+    if model is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Answering is unavailable")
+    return model
+
+
+Llm = Annotated[LanguageModel, Depends(get_language_model)]
+
+
+def get_quota_tracker(request: Request) -> QuotaTracker:
+    """Shared through Redis, so every worker counts into the same budget."""
+    tracker: QuotaTracker = request.app.state.quota
+    return tracker
+
+
+Quota = Annotated[QuotaTracker, Depends(get_quota_tracker)]
 
 
 def get_ingestion_store(request: Request) -> IngestionStore:

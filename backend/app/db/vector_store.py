@@ -28,6 +28,10 @@ class RetrievedChunk:
     """A passage found by a search, with everything a citation needs."""
 
     document_id: uuid.UUID
+    # Joined from `documents`, because a citation the user cannot recognise is
+    # not a citation. The docstring above already promised "everything a
+    # citation needs"; until now it was not true.
+    filename: str
     chunk_index: int
     page_number: int
     text: str
@@ -102,8 +106,15 @@ async def search_chunks(
     # normalised vectors we store; the default operator would rank differently.
     distance = DocumentChunk.embedding.cosine_distance(list(query_vector))
 
-    statement = select(DocumentChunk, distance.label("distance")).where(
-        DocumentChunk.owner_id == owner_id
+    # The join is on the chunk table that already carries `owner_id`, so the
+    # filter below still stands alone: the join adds a name to rows that were
+    # already restricted, it is never what restricts them. One statement rather
+    # than a second round trip, and the planner joins at most `limit` rows
+    # because the join happens after the index has ranked them.
+    statement = (
+        select(DocumentChunk, Document.filename, distance.label("distance"))
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(DocumentChunk.owner_id == owner_id)
     )
     if max_distance is not None:
         statement = statement.where(distance <= max_distance)
@@ -113,12 +124,13 @@ async def search_chunks(
     return [
         RetrievedChunk(
             document_id=chunk.document_id,
+            filename=filename,
             chunk_index=chunk.chunk_index,
             page_number=chunk.page_number,
             text=chunk.text,
             distance=float(value),
         )
-        for chunk, value in rows.all()
+        for chunk, filename, value in rows.all()
     ]
 
 
