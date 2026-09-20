@@ -2,6 +2,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote_plus
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,6 +66,34 @@ class Settings(BaseSettings):
     # Named `embedding_cache_dir`, not `model_cache_dir`: pydantic reserves the
     # `model_` prefix for its own API and would warn about the collision.
     embedding_cache_dir: str | None = None
+
+    # --- Generation (GroqCloud, ADR-0012) ---
+    # Empty disables generation entirely: the chat endpoint answers 503 and
+    # the rest of the application still starts. An optional external service
+    # must never be able to prevent the process from booting.
+    groq_api_key: str = ""
+    # One line, because LanguageModel is a Protocol. The documentation lists
+    # models this account cannot reach, so this value was chosen from the
+    # models endpoint queried with the real key.
+    groq_model: str = "openai/gpt-oss-120b"
+
+    @field_validator("groq_api_key", "groq_model", mode="after")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        """Whitespace pasted around a value is invisible and never harmless.
+
+        A key pasted as sixteen spaces is not empty, so `if not key` lets it
+        through, the application boots believing it is configured, and the
+        first user sees a 401 about authorisation rather than the truth: a
+        failed copy and paste. Empty and blank are different, and blank is
+        the one that slips through.
+        """
+        return value.strip()
+
+    @property
+    def generation_enabled(self) -> bool:
+        """Reads after the strip above, so blank counts as absent."""
+        return bool(self.groq_api_key)
 
     @property
     def database_url(self) -> str:
