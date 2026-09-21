@@ -1,0 +1,41 @@
+# Everything listed here is excluded from the build context - the tarball the
+# daemon receives before the first instruction runs. It is not a detail: the
+# context is uploaded in full on every build, and anything inside it can be
+# copied into an image by an accidental `COPY . .`.
+#
+# Deny nothing by default would mean sending 1.4 GB of virtual environment to
+# build an image that rebuilds it anyway.
+
+# The local virtual environment: 1.4 GB, built for this machine, and rebuilt
+# inside the image from uv.lock. Copying it in would also be wrong, not merely
+# slow - it holds absolute paths and binaries compiled for the host.
+.venv/
+
+# Secrets. Never in an image: an image is pushed, pulled, cached and scanned by
+# people who are not you. Configuration reaches a container at RUN time,
+# through the environment, never at BUILD time through a file.
+.env
+.env.*
+!.env.example
+
+# Caches and generated artefacts: large, machine-specific, and regenerated.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# User documents and the vector store live in a volume, not in an image.
+../.data/
+.data/
+
+# Not needed to RUN the service. Tests belong in CI, which runs against the
+# source, not against the production image. Shipping them enlarges the image
+# and the attack surface for no benefit.
+tests/
+evals/
+
+Dockerfile
+.dockerignore
