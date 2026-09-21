@@ -20,6 +20,9 @@ decisions is as useful as the decisions themselves.
 | [0009](0009-no-state-management-library.md) | No state management library for now | Accepted |
 | [0010](0010-ocr-as-a-fallback.md) | OCR is a fallback, not a systematic step | Accepted |
 | [0011](0011-pgvector-instead-of-a-separate-vector-store.md) | pgvector in the application database, not a separate vector store | Accepted |
+| [0012](0012-hosted-llm-behind-an-interface.md) | A hosted LLM (Groq) for generation, behind an interface | Accepted, amended by 0014 |
+| [0013](0013-ingestion-in-a-worker-process.md) | Ingestion in a separate worker process (arq) | Accepted |
+| [0014](0014-langchain-for-the-rag-pipeline.md) | LangChain for the RAG pipeline, on our own table and our own guards | Accepted |
 
 ## Template
 

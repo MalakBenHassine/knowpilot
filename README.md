@@ -18,7 +18,7 @@
 | Frontend       | React, TypeScript, Vite, Tailwind CSS                |
 | Backend        | FastAPI (Python 3.12)                                |
 | Authentication | Keycloak (OpenID Connect), Backend-for-Frontend      |
-| RAG            | BGE-M3 embeddings, Chroma, Groq LLM                  |
+| RAG            | LangChain, BGE-M3 embeddings, pgvector, Groq LLM     |
 | Data           | PostgreSQL, Redis                                    |
 | DevSecOps      | GitHub Actions, SonarCloud, Snyk, Trivy, gitleaks    |
 | Infrastructure | Docker Compose, Kubernetes (k3s), Nginx, Let's Encrypt |
