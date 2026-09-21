@@ -45,8 +45,28 @@ export function AssistantMessage({
       </div>
 
       {/* Assistant output is announced politely once it settles. */}
-      <div className="min-w-0 flex-1" aria-live="polite" aria-atomic="false">
+      {/* aria-busy while text is still arriving: without it a screen reader
+          would announce every fragment, dozens of times per answer. It reads
+          the answer once, when it has settled. */}
+      <div
+        className="min-w-0 flex-1"
+        aria-live="polite"
+        aria-atomic="false"
+        aria-busy={turn.state.phase === 'loading' || turn.state.phase === 'streaming'}
+      >
         {turn.state.phase === 'loading' ? <LoadingAnswer stage={turn.state.stage} /> : null}
+
+        {turn.state.phase === 'streaming' ? (
+          <div className="prose-answer text-body text-ink">
+            {/* Only verified text reaches this state: the server holds
+                everything back until the first valid citation. */}
+            <Markdown>{turn.state.text}</Markdown>
+            <span
+              className="ml-0.5 inline-block h-4 w-1.5 animate-pulse-soft rounded-sm bg-accent align-text-bottom"
+              aria-hidden="true"
+            />
+          </div>
+        ) : null}
 
         {turn.state.phase === 'answered' ? (
           <div className="space-y-4">

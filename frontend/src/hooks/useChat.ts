@@ -1,10 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError } from '../services/api'
-import { askQuestion } from '../services/chat'
+import { streamQuestion } from '../services/chat'
 import type { AssistantTurn, AssistantTurnState, ChatTurn, UserTurn } from '../types/chat'
-
-/** Delay before the loading copy moves from "searching" to "generating". */
-const GENERATING_STAGE_DELAY_MS = 1200
 
 /**
  * Anything that is not an ApiError is a bug in our own code, and a bug is a
@@ -18,7 +15,8 @@ function errorStateOf(error: unknown): AssistantTurnState {
 
 /**
  * Owns the conversation. One question produces exactly one assistant turn,
- * which then moves through loading -> answered | insufficient_evidence | error.
+ * which then moves through
+ *   loading -> [streaming ->] answered | insufficient_evidence | error.
  */
 export function useChat() {
   const [turns, setTurns] = useState<ChatTurn[]>([])
@@ -40,12 +38,21 @@ export function useChat() {
       const controller = new AbortController()
       abortRef.current = controller
 
-      const stageTimer = window.setTimeout(() => {
-        updateAssistantTurn(assistantTurnId, { phase: 'loading', stage: 'generating' })
-      }, GENERATING_STAGE_DELAY_MS)
-
       try {
-        const payload = await askQuestion(question, controller.signal)
+        const payload = await streamQuestion(
+          question,
+          {
+            // A real stage, sent by the server when retrieval is over - it used
+            // to be guessed with a 1.2 s timer, which was wrong both ways.
+            onGenerating: () =>
+              updateAssistantTurn(assistantTurnId, { phase: 'loading', stage: 'generating' }),
+            onText: (text) => updateAssistantTurn(assistantTurnId, { phase: 'streaming', text }),
+          },
+          controller.signal,
+        )
+        // The final state is the server's verdict, never the streamed text:
+        // it carries the sources, and it replaces the text if the answer was
+        // withdrawn at the last moment.
         updateAssistantTurn(
           assistantTurnId,
           payload.outcome === 'answered'
@@ -55,7 +62,6 @@ export function useChat() {
       } catch (error) {
         updateAssistantTurn(assistantTurnId, errorStateOf(error))
       } finally {
-        window.clearTimeout(stageTimer)
         setIsBusy(false)
       }
     },

@@ -65,8 +65,31 @@ export interface RequestOptions {
   timeoutMs?: number
 }
 
+/** A JSON request: the common case. */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, headers = {}, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+  const response = await send(path, options)
+  return (await response.json()) as T
+}
+
+/**
+ * A request whose body the caller reads itself - a Server-Sent Events stream.
+ *
+ * Same credentials, same CSRF token, same error mapping as `request`: a stream
+ * is not a second way into the API with its own, weaker rules. The timeout
+ * covers the WHOLE stream, body included, so a server that opens a stream and
+ * then goes silent cannot hold the tab for ever.
+ */
+export async function openStream(path: string, options: RequestOptions = {}): Promise<Response> {
+  return send(path, {
+    ...options,
+    headers: { Accept: 'text/event-stream', ...options.headers },
+  })
+}
+
+async function send(path: string, options: RequestOptions): Promise<Response> {
+  const { method = 'GET', body, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+  // Copied: the caller's object is never mutated with our CSRF header.
+  const headers = { ...options.headers }
 
   // Safe methods never change state, so they need no CSRF token.
   if (method !== 'GET' && csrfToken) {
@@ -102,5 +125,5 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     )
   }
 
-  return (await response.json()) as T
+  return response
 }

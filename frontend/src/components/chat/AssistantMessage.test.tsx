@@ -30,6 +30,21 @@ describe('AssistantMessage', () => {
     expect(screen.getByText(/generating answer/i)).toBeInTheDocument()
   })
 
+  it('shows streamed text without sources until the verdict arrives', () => {
+    const { container } = render(
+      <AssistantMessage
+        turn={turnWith({ phase: 'streaming', text: 'The termination period is **30 days** [1].' })}
+        onRetry={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('30 days')).toBeInTheDocument()
+    // Sources belong to the final answer only.
+    expect(screen.queryByRole('region', { name: /sources/i })).not.toBeInTheDocument()
+    // Screen readers wait for the settled answer instead of every fragment.
+    expect(container.querySelector('[aria-busy="true"]')).not.toBeNull()
+  })
+
   it('renders the answer with its sources', () => {
     render(
       <AssistantMessage

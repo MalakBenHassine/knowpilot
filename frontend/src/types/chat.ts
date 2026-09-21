@@ -17,10 +17,16 @@ export type ChatErrorKind = 'network' | 'timeout' | 'rate_limited' | 'server'
 
 /**
  * Client-side state of one assistant turn.
- * Four distinct states — never a single isLoading boolean.
+ * Distinct states — never a single isLoading boolean.
  */
 export type AssistantTurnState =
   | { phase: 'loading'; stage: LoadingStage }
+  /**
+   * Verified text arriving. Deliberately without sources: they belong to the
+   * final answer, and a source card shown before the verdict could be for a
+   * passage the final answer does not cite.
+   */
+  | { phase: 'streaming'; text: string }
   | { phase: 'answered'; answer: string; sources: Source[] }
   | { phase: 'insufficient_evidence' }
   | {
