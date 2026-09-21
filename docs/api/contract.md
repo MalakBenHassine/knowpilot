@@ -226,3 +226,67 @@ because an outage must not cost a user part of their day. A grounded
 refusal is NOT refunded: the call happened and the tokens were spent.
 
 Nothing is charged when retrieval finds nothing, because nothing is sent.
+
+### `POST /api/chat/stream`
+
+The same question, the same rules, the same answer - delivered as
+Server-Sent Events (`Content-Type: text/event-stream`) while it is generated.
+
+- Authentication: required - CSRF header: required
+- Body: `{ "question": string }`, exactly as `POST /api/chat`
+- `401`, `422`, `429` (with `Retry-After`) and `503` are returned as status
+  codes, BEFORE the stream opens: authentication, validation, retrieval and
+  the quota are all settled first
+- `200` with a stream of events:
+
+| Event | Data | Meaning |
+| --- | --- | --- |
+| `stage` | `{"stage": "generating"}` | retrieval is over, the model is called |
+| `token` | `{"text": "..."}` | verified text to APPEND to what is shown |
+| `done` | same body as `POST /api/chat` | the authoritative answer; REPLACES what was shown |
+| `error` | `{"kind": "server"}` or `{"kind": "rate_limited", "retry_after": 1800}` | sent instead of `done` when the provider fails mid-way |
+
+Nothing the guards would reject is ever sent. The server holds the text back
+until the first valid citation `[n]` has been generated: from that point the
+answer can no longer be judged "unsourced". An answer with no valid citation,
+and the refusal word, are never streamed at all. A short answer whose only
+citation is at its end therefore arrives in one piece.
+
+If the refusal word appears AFTER a citation, generation is stopped and
+`done` carries `is_grounded: false`: the client replaces the text it showed.
+
+`EventSource` cannot send a POST body or the CSRF header, so the client reads
+the stream with `fetch`. A client that disconnects mid-answer closes the
+provider's stream too, and is not refunded - the tokens were spent.
+
+### `POST /api/chat/stream`
+
+The same question, the same rules, the same answer - delivered as
+Server-Sent Events (`Content-Type: text/event-stream`) while it is generated.
+
+- Authentication: required - CSRF header: required
+- Body: `{ "question": string }`, exactly as `POST /api/chat`
+- `401`, `422`, `429` (with `Retry-After`) and `503` are returned as status
+  codes, BEFORE the stream opens: authentication, validation, retrieval and
+  the quota are all settled first
+- `200` with a stream of events:
+
+| Event | Data | Meaning |
+| --- | --- | --- |
+| `stage` | `{"stage": "generating"}` | retrieval is over, the model is called |
+| `token` | `{"text": "..."}` | verified text to APPEND to what is shown |
+| `done` | same body as `POST /api/chat` | the authoritative answer; REPLACES what was shown |
+| `error` | `{"kind": "server"}` or `{"kind": "rate_limited", "retry_after": 1800}` | sent instead of `done` when the provider fails mid-way |
+
+Nothing the guards would reject is ever sent. The server holds the text back
+until the first valid citation `[n]` has been generated: from that point the
+answer can no longer be judged "unsourced". An answer with no valid citation,
+and the refusal word, are never streamed at all. A short answer whose only
+citation is at its end therefore arrives in one piece.
+
+If the refusal word appears AFTER a citation, generation is stopped and
+`done` carries `is_grounded: false`: the client replaces the text it showed.
+
+`EventSource` cannot send a POST body or the CSRF header, so the client reads
+the stream with `fetch`. A client that disconnects mid-answer closes the
+provider stream too, and is not refunded - the tokens were spent.

@@ -23,6 +23,8 @@ decisions is as useful as the decisions themselves.
 | [0012](0012-hosted-llm-behind-an-interface.md) | A hosted LLM (Groq) for generation, behind an interface | Accepted, amended by 0014 |
 | [0013](0013-ingestion-in-a-worker-process.md) | Ingestion in a separate worker process (arq) | Accepted |
 | [0014](0014-langchain-for-the-rag-pipeline.md) | LangChain for the RAG pipeline, on our own table and our own guards | Accepted |
+| [0015](0015-hybrid-retrieval.md) | Hybrid retrieval: full-text search beside the embeddings | Accepted |
+| [0016](0016-streaming-verified-text-only.md) | Stream answers, but only text the guards have already accepted | Accepted |
 
 ## Template
 
