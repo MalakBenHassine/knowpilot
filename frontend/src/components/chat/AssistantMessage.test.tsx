@@ -61,6 +61,7 @@ describe('AssistantMessage', () => {
               snippet: '90 euros si remplacement.',
             },
           ],
+          notInDocuments: [],
         })}
         onRetry={vi.fn()}
       />,
@@ -86,6 +87,7 @@ describe('AssistantMessage', () => {
               score: 0.82,
             },
           ],
+          notInDocuments: [],
         })}
         onRetry={vi.fn()}
       />,
@@ -98,6 +100,41 @@ describe('AssistantMessage', () => {
     expect(screen.getByText('0.82')).toBeInTheDocument()
   })
 
+  it('says so when the answer rests on something the documents never name', () => {
+    render(
+      <AssistantMessage
+        turn={turnWith({
+          phase: 'answered',
+          answer: 'Bris de glace : 90 euros si remplacement [1].',
+          sources: [],
+          notInDocuments: ['rétroviseur', 'code PIN'],
+        })}
+        onRetry={vi.fn()}
+      />,
+    )
+
+    // A status, not an alert: the answer may be right, nothing is broken.
+    const notice = screen.getByRole('status')
+    expect(notice).toHaveTextContent('Your documents never mention “rétroviseur” and “code PIN”.')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows no notice when the documents name what was asked', () => {
+    render(
+      <AssistantMessage
+        turn={turnWith({
+          phase: 'answered',
+          answer: 'Vol : 350 euros [1].',
+          sources: [],
+          notInDocuments: [],
+        })}
+        onRetry={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByText(/never mention/i)).toBeNull()
+  })
+
   it('does not render HTML coming from the model (XSS)', () => {
     render(
       <AssistantMessage
@@ -105,6 +142,7 @@ describe('AssistantMessage', () => {
           phase: 'answered',
           answer: 'Harmless <img src=x onerror="alert(1)"> text',
           sources: [],
+          notInDocuments: [],
         })}
         onRetry={vi.fn()}
       />,

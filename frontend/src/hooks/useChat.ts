@@ -56,7 +56,12 @@ export function useChat() {
         updateAssistantTurn(
           assistantTurnId,
           payload.outcome === 'answered'
-            ? { phase: 'answered', answer: payload.answer, sources: payload.sources }
+            ? {
+                phase: 'answered',
+                answer: payload.answer,
+                sources: payload.sources,
+                notInDocuments: payload.notInDocuments,
+              }
             : { phase: 'insufficient_evidence' },
         )
       } catch (error) {

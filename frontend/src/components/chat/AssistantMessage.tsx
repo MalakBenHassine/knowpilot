@@ -3,6 +3,7 @@ import Markdown from 'react-markdown'
 import { formatWait } from '../../lib/format'
 import type { AssistantTurn, ChatErrorKind } from '../../types/chat'
 import type { Source } from '../../types/source'
+import { Alert } from '../ui/Alert'
 import { Button } from '../ui/Button'
 import { Logo } from '../ui/Logo'
 import { LoadingAnswer } from './LoadingAnswer'
@@ -22,6 +23,12 @@ const ERROR_COPY: Record<ChatErrorKind, string> = {
  * guess, and "try again in about 3 hours" is something a person can act on -
  * "try again later" is something they can only re-attempt and be refused for.
  */
+/** "rétroviseur" or "rétroviseur" and "code PIN", in typographic quotes. */
+function quoted(subjects: string[]): string {
+  const each = subjects.map((subject) => `“${subject}”`)
+  return each.length > 1 ? `${each.slice(0, -1).join(', ')} and ${each.at(-1)}` : (each[0] ?? '')
+}
+
 function errorCopy(kind: ChatErrorKind, retryAfterSeconds?: number): string {
   if (kind === 'rate_limited' && retryAfterSeconds !== undefined) {
     return `You have used your questions for now. Try again in ${formatWait(retryAfterSeconds)}.`
@@ -70,6 +77,20 @@ export function AssistantMessage({
 
         {turn.state.phase === 'answered' ? (
           <div className="space-y-4">
+            {/* Above the answer, not below it: it changes how the answer
+                should be read, so it is read first. A warning tone rather
+                than an error: the answer may well be right - a windscreen is
+                glass - but it rests on a category, not on a name. */}
+            {turn.state.notInDocuments.length > 0 ? (
+              <Alert
+                tone="warning"
+                title={`Your documents never mention ${quoted(turn.state.notInDocuments)}.`}
+              >
+                This answer relies on what they say about something broader. Check that it
+                applies before relying on it.
+              </Alert>
+            ) : null}
+
             <div className="prose-answer text-body text-ink">
               {/* react-markdown does NOT render raw HTML by default: no XSS from
                   model output, which is untrusted content. */}

@@ -56,7 +56,19 @@ export function toAnswerPayload(raw: unknown): AnswerPayload {
     outcome: 'answered',
     answer: asString(value.answer, 'answer.answer'),
     sources: value.citations.map(toSource),
+    notInDocuments: notInDocumentsOf(value.not_in_documents),
   }
+}
+
+/**
+ * Absent is read as "nothing to report": the field is newer than the rest of
+ * the contract, and a server one release behind must not break every answer.
+ * Present but malformed is a broken contract, and fails like one.
+ */
+function notInDocumentsOf(raw: unknown): string[] {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) throw new InvalidResponseError('answer.not_in_documents')
+  return raw.map((subject, index) => asString(subject, `answer.not_in_documents[${index}]`))
 }
 
 /** What the stream reports while the answer is being produced. */

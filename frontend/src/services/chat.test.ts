@@ -38,7 +38,28 @@ describe('toAnswerPayload (wire format -> domain)', () => {
           snippet: 'Les conges payes sont de 25 jours par annee complete.',
         },
       ],
+      notInDocuments: [],
     })
+  })
+
+  it('carries what no passage names', () => {
+    const payload = toAnswerPayload(apiAnswer({ not_in_documents: ['rétroviseur'] }))
+
+    expect(payload).toMatchObject({ outcome: 'answered', notInDocuments: ['rétroviseur'] })
+  })
+
+  it('reads a server that does not send the field yet as nothing to report', () => {
+    // apiAnswer() has no not_in_documents: a backend one release behind.
+    expect(toAnswerPayload(apiAnswer())).toMatchObject({ notInDocuments: [] })
+  })
+
+  it('rejects a malformed list instead of rendering it', () => {
+    expect(() => toAnswerPayload(apiAnswer({ not_in_documents: 'rétroviseur' }))).toThrow(
+      InvalidResponseError,
+    )
+    expect(() => toAnswerPayload(apiAnswer({ not_in_documents: [42] }))).toThrow(
+      InvalidResponseError,
+    )
   })
 
   it('turns an ungrounded answer into a normal outcome, not an error', () => {

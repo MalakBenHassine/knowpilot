@@ -101,6 +101,7 @@ export const mockBackend = {
     const secondary = readyDocuments[1]
     return {
       outcome: 'answered',
+      notInDocuments: [],
       answer: [
         `Based on **${primary?.filename ?? 'your documents'}**, here is what I found:`,
         '',

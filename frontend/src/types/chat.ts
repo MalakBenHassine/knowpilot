@@ -6,7 +6,18 @@ import type { Source } from './source'
  * found nothing relevant enough, so no answer was generated.
  */
 export type AnswerPayload =
-  | { outcome: 'answered'; answer: string; sources: Source[] }
+  | {
+      outcome: 'answered'
+      answer: string
+      sources: Source[]
+      /**
+       * What the question asks about and no passage names - "rétroviseur"
+       * when the contract only speaks of glass breakage. Checked by the
+       * database, so it is a fact about the documents, not the model's
+       * opinion. Empty on almost every answer.
+       */
+      notInDocuments: string[]
+    }
   | { outcome: 'insufficient_evidence' }
 
 /** What the assistant is doing while we wait. Drives the loading copy. */
@@ -27,7 +38,7 @@ export type AssistantTurnState =
    * passage the final answer does not cite.
    */
   | { phase: 'streaming'; text: string }
-  | { phase: 'answered'; answer: string; sources: Source[] }
+  | { phase: 'answered'; answer: string; sources: Source[]; notInDocuments: string[] }
   | { phase: 'insufficient_evidence' }
   | {
       phase: 'error'
