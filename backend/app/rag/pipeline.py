@@ -1,29 +1,39 @@
 """The ingestion pipeline: a file goes in, searchable passages come out.
 
-This module orchestrates parsing, chunking, embedding and indexing. It knows
-nothing about PostgreSQL: persistence arrives as an `IngestionStore`, which is
-why the whole orchestration can be tested in milliseconds against a fake, with
-real parsing and real chunking.
+The canonical LangChain indexing flow - load, split, embed, store - with each
+step a standard component:
+
+    UploadedFileLoader (BaseLoader)  ->  Documents, one per page
+    RecursiveCharacterTextSplitter   ->  Documents, one per chunk
+    Embeddings.aembed_documents      ->  vectors
+    PGVectorStore (via the store)    ->  rows in document_chunks
+
+This module knows nothing about PostgreSQL: persistence arrives as an
+`IngestionStore`, which is why the whole orchestration is tested in
+milliseconds against a fake store and LangChain's fake embeddings, with real
+parsing and real splitting.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from functools import partial
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 import anyio.to_thread
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 
-from app.rag.chunking import chunk_document
-from app.rag.embeddings import EmbeddedChunk, EmbeddingModel, embed_chunks
+from app.rag.chunking import split_pages
+from app.rag.loaders import UploadedFileLoader
 from app.rag.parsing import (
     DocumentTooLargeError,
     NoTextFoundError,
     ParsingError,
     UnsupportedFormatError,
-    parse_document,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,10 +48,19 @@ FAILURES: tuple[tuple[type[ParsingError], str, bool], ...] = (
 )
 
 
+@dataclass(frozen=True)
+class StoredFile:
+    path: Path
+    mime_type: str
+    # The name the user chose. Copied onto every chunk as metadata, so a
+    # citation can name its file without a second query at answer time.
+    filename: str
+
+
 class IngestionStore(Protocol):
     """What the pipeline needs from persistence, and nothing more."""
 
-    async def load(self, document_id: uuid.UUID, owner_id: str) -> tuple[Path, str] | None: ...
+    async def load(self, document_id: uuid.UUID, owner_id: str) -> StoredFile | None: ...
 
     async def set_stage(self, document_id: uuid.UUID, stage: str) -> None: ...
 
@@ -50,8 +69,10 @@ class IngestionStore(Protocol):
         *,
         document_id: uuid.UUID,
         owner_id: str,
-        embedded: list[EmbeddedChunk],
-        model_name: str,
+        filename: str,
+        chunks: Sequence[Document],
+        vectors: Sequence[Sequence[float]],
+        embedding_model: str,
         page_count: int,
     ) -> None: ...
 
@@ -67,62 +88,63 @@ def _classify(error: ParsingError) -> tuple[str, bool]:
 
 async def ingest_document(
     store: IngestionStore,
-    model: EmbeddingModel,
+    embeddings: Embeddings,
     *,
+    embedding_model: str,
     document_id: uuid.UUID,
     owner_id: str,
 ) -> None:
-    """Parse, chunk, embed and index one document.
+    """Load, split, embed and index one document.
 
-    This function never raises. It runs after the response has been sent, so
-    there is nobody left to receive an error: an escaped exception would leave
-    the document stuck in `processing` for ever, showing a spinner the user
-    cannot stop and cannot retry.
+    This function never raises. It runs in the worker, where there is nobody
+    left to receive an error: an escaped exception would leave the document
+    stuck in `processing` for ever, showing a spinner the user cannot stop.
     """
     found = await store.load(document_id, owner_id)
     if found is None:
-        # The upload transaction rolled back after this task was scheduled, or
-        # the user deleted the document in between. Nothing to do, and
-        # certainly nothing to fail about.
+        # The user deleted the document in between, or the upload rolled back.
+        # Nothing to do, and certainly nothing to fail about.
         logger.info("document %s is gone, skipping indexing", document_id)
         return
 
-    path, mime_type = found
-
     try:
-        # Every step here is CPU-bound and blocking. Called directly, it would
-        # freeze the event loop and with it every other request in flight.
-        # run_sync moves it to a worker thread, and torch releases the GIL
-        # while it computes, so the thread genuinely runs in parallel.
-        parsed = await anyio.to_thread.run_sync(partial(parse_document, path, mime_type))
+        # Loading and splitting are CPU-bound and blocking. Called directly,
+        # they would freeze the event loop; run_sync moves them to a thread.
+        loader = UploadedFileLoader(found.path, found.mime_type, filename=found.filename)
+        pages = await anyio.to_thread.run_sync(loader.load)
 
         # The stage is written before each step, not after: the user sees what
         # is happening now, not what has just finished.
         await store.set_stage(document_id, "chunking")
-        chunks = await anyio.to_thread.run_sync(chunk_document, parsed)
+        chunks = await anyio.to_thread.run_sync(split_pages, pages)
         if not chunks:
-            # Parsing found text but chunking kept none of it - whitespace, a
-            # single character, a page of dashes. Indexing nothing would leave
-            # a document that is ready and answers no question at all.
+            # Parsing found text but splitting kept none of it - whitespace, a
+            # page of dashes. Indexing nothing would leave a document that is
+            # ready and answers no question at all.
             raise NoTextFoundError("parsing produced no usable passage")
 
         await store.set_stage(document_id, "embedding")
-        embedded = await anyio.to_thread.run_sync(partial(embed_chunks, chunks, model))
+        # aembed_documents runs the model in a thread pool: torch releases the
+        # GIL while it computes, so the thread genuinely runs in parallel.
+        vectors = await embeddings.aembed_documents([chunk.page_content for chunk in chunks])
 
         await store.set_stage(document_id, "indexing")
+        page_count = int(pages[0].metadata["total_pages"]) if pages else 0
         await store.save_result(
             document_id=document_id,
             owner_id=owner_id,
-            embedded=embedded,
-            model_name=model.name,
-            page_count=parsed.page_count,
+            filename=found.filename,
+            chunks=chunks,
+            vectors=vectors,
+            embedding_model=embedding_model,
+            page_count=page_count,
         )
         logger.info(
             "indexed document %s: %d pages, %d chunks, %d pages via ocr",
             document_id,
-            parsed.page_count,
+            page_count,
             len(chunks),
-            parsed.ocr_page_count,
+            sum(1 for page in pages if page.metadata.get("extraction") == "ocr"),
         )
     except ParsingError as error:
         reason, retryable = _classify(error)

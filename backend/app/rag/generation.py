@@ -1,5 +1,9 @@
 """Turning retrieved passages into an answer that can be checked.
 
+The prompt is a LangChain `ChatPromptTemplate` and the call goes through an
+LCEL chain (`prompt | model | parser`, built in llm.py). What stays plain
+Python is the part no framework provides: the guards around the chain.
+
 The model is handed numbered passages and may refer to them only by number. It
 never sees a filename or a page number, so an invented citation is not merely
 detected afterwards - it cannot be expressed in the first place.
@@ -13,26 +17,21 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any
+
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import Runnable
 
 logger = logging.getLogger(__name__)
 
-# The distance ceiling is NOT here. It is retrieval policy, it depends on the
-# documents a deployment holds, and it is the value most likely to be tuned
-# against the evaluation harness - so it lives in the settings and reaches the
-# retrieval call as an argument. Nothing in this module needs it: by the time
-# `answer_question` runs, the filtering has already happened.
-#
-# How many passages reach the model is retrieval policy too, and it lives in
-# the settings beside the distance ceiling. It moves with the chunk size: five
-# chunks of a thousand characters and eight of six hundred carry almost the
-# same context, and therefore almost the same token cost - which matters when
-# the whole service has about eighty-five questions a day.
-#
-# More context is not better on its own: it dilutes the question, costs quota,
-# and pushes the instructions further from the end of the prompt, where a model
-# weights them most.
+# The distance ceiling and the number of passages are NOT here. They are
+# retrieval policy, tuned against the evaluation harness, and they live in the
+# settings (see OwnerScopedRetriever). By the time `answer_question` runs, the
+# filtering has already happened.
 
 # A question longer than this is a paste, a mistake or an attack. Refusing it
 # at the boundary is cheaper than paying for it in tokens.
@@ -43,10 +42,9 @@ MAX_QUESTION_CHARACTERS = 1000
 REFUSAL = "INSUFFICIENT_EVIDENCE"
 
 # Below this, an answer with no citation is the model refusing in its own words
-# rather than with the token we asked for - "the passages do not say" is a
-# refusal, however it is phrased. Above it, an uncited answer is the model
-# asserting things it sourced nowhere, which is the event worth waking up for.
-# Measured on a real refusal: thirty-one characters.
+# rather than with the token we asked for. Above it, an uncited answer is the
+# model asserting things it sourced nowhere, which is the event worth waking up
+# for. Measured on a real refusal: thirty-one characters.
 UNCITED_REFUSAL_CHARACTERS = 120
 
 SYSTEM_PROMPT = f"""You answer questions about the private documents of one user.
@@ -67,32 +65,30 @@ Rules, in order of importance:
 5. Answer in the language of the question.
 """
 
-
-class LanguageModel(Protocol):
-    """One method, so the provider stays a configuration choice.
-
-    The same shape as OcrEngine, EmbeddingModel and IngestionStore: whenever a
-    dependency is external, metered or replaceable, an interface goes in front
-    of it.
-    """
-
-    async def complete(self, system: str, user: str) -> str: ...
-
-
-@dataclass(frozen=True)
-class Passage:
-    """A retrieved chunk together with the citation data the model never sees."""
-
-    text: str
-    filename: str
-    page_number: int
+# The question comes LAST. A model weights the end of its context most
+# heavily, so the instruction that must survive is the one it reads last; and a
+# document ending with "ignore the above" argues against text that no longer
+# follows it.
+#
+# `{passages}` and `{question}` are template variables, filled by value: a
+# brace inside a document or a question is inserted as text and never parsed
+# as a placeholder, so user content cannot inject a variable into the prompt.
+ANSWER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", SYSTEM_PROMPT),
+        ("human", "<passages>\n{passages}\n</passages>\n\nQuestion: {question}"),
+    ]
+)
 
 
 @dataclass(frozen=True)
 class Citation:
     number: int  # what the model wrote: [1]
-    filename: str  # what we attach afterwards
+    # Everything below is attached by us afterwards, from the passage metadata.
+    document_id: uuid.UUID
+    filename: str
     page_number: int
+    passage: str  # the full passage, from which the snippet is quoted
 
 
 @dataclass(frozen=True)
@@ -114,10 +110,6 @@ _CITATION = re.compile(r"\[(\d+)\]")
 # invisible to a reader and fatal to a regular expression. Found in production
 # on the first real question: the answer was correct, it was cited, and it was
 # thrown away by our own parser.
-#
-# Rule 3 of the prompt now asks for ASCII explicitly. Asking is not obtaining,
-# which is the premise of this entire module, so the shapes a model actually
-# produces are folded into the one we read.
 _BRACKETS = str.maketrans({"【": "[", "】": "]", "［": "[", "］": "]"})
 
 
@@ -135,26 +127,17 @@ def _neutralise(text: str) -> str:
 
     A document containing the literal `</passages>` would end the data section
     early, and everything after it would read to the model as instructions.
-    This is escaping, in the same sense as escaping a quote before placing it
-    inside a string - and it is the closest thing a prompt has to a prepared
-    statement.
+    The closest thing a prompt has to a prepared statement.
     """
     return text.replace("</passages>", "</passage>").replace("<passages>", "<passage>")
 
 
-def build_user_prompt(question: str, passages: list[Passage]) -> str:
-    """Number the passages, then ask the question LAST.
-
-    A model weights the end of its context most heavily, so the instruction
-    that must survive is the one it reads last. Putting the question after the
-    documents also makes a document that ends with "ignore the above" argue
-    against text that no longer follows it.
-    """
-    numbered = "\n\n".join(
-        f"[{number}] {_neutralise(passage.text)}"
+def format_passages(passages: Sequence[Document]) -> str:
+    """Number the passages. Only the text reaches the model - no metadata."""
+    return "\n\n".join(
+        f"[{number}] {_neutralise(passage.page_content)}"
         for number, passage in enumerate(passages, start=1)
     )
-    return f"<passages>\n{numbered}\n</passages>\n\nQuestion: {question}"
 
 
 def _valid_citations(raw: str, passage_count: int) -> list[int]:
@@ -167,7 +150,22 @@ def _valid_citations(raw: str, passage_count: int) -> list[int]:
     return sorted(number for number in cited if 1 <= number <= passage_count)
 
 
-async def answer_question(question: str, passages: list[Passage], model: LanguageModel) -> Answer:
+def _cite(number: int, passage: Document) -> Citation:
+    metadata = passage.metadata
+    return Citation(
+        number=number,
+        document_id=uuid.UUID(str(metadata["document_id"])),
+        filename=str(metadata["filename"]),
+        page_number=int(metadata["page_number"]),
+        passage=passage.page_content,
+    )
+
+
+async def answer_question(
+    question: str,
+    passages: Sequence[Document],
+    chain: Runnable[dict[str, Any], str],
+) -> Answer:
     """Answer strictly from the passages, or admit that it cannot."""
     question = question.strip()
     if not question:
@@ -176,11 +174,11 @@ async def answer_question(question: str, passages: list[Passage], model: Languag
         raise ValueError(f"the question exceeds {MAX_QUESTION_CHARACTERS} characters")
 
     # Guard 1, the only one that cannot be argued with: with nothing close
-    # enough to the question, the model is not called at all.
+    # enough to the question, the chain is not invoked at all.
     if not passages:
         return UNGROUNDED
 
-    reply = await model.complete(SYSTEM_PROMPT, build_user_prompt(question, passages))
+    reply = await chain.ainvoke({"passages": format_passages(passages), "question": question})
     raw = _normalise_citations(reply.strip())
 
     # Guard 2: the model was asked to say this word rather than invent. Asking
@@ -193,15 +191,9 @@ async def answer_question(question: str, passages: list[Passage], model: Languag
     numbers = _valid_citations(raw, len(passages))
     if not numbers:
         # Logged, because this outcome and an honest refusal look identical to
-        # a user and are completely different events to us: the model may have
-        # answered perfectly in a shape we failed to read. Without this line
-        # the two are indistinguishable, and such a bug lives for months.
-        #
-        # The LENGTH is what separates them, which the first version of this
-        # log missed. A short uncited reply is the model refusing in its own
-        # words instead of the exact token we asked for - expected, and this
-        # guard catching it is the system working. A LONG uncited reply is the
-        # alarming one: the model asserted things and sourced none of them.
+        # a user and are different events to us. The LENGTH separates them: a
+        # short uncited reply is a refusal in the model's own words; a long one
+        # is the model asserting things it sourced nowhere.
         #
         # The shape is logged and never the text: an answer quotes the private
         # documents of a user, and a log is a file that travels.
@@ -217,13 +209,6 @@ async def answer_question(question: str, passages: list[Passage], model: Languag
 
     return Answer(
         text=raw,
-        citations=[
-            Citation(
-                number=number,
-                filename=passages[number - 1].filename,
-                page_number=passages[number - 1].page_number,
-            )
-            for number in numbers
-        ],
+        citations=[_cite(number, passages[number - 1]) for number in numbers],
         is_grounded=True,
     )

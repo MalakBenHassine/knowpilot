@@ -1,20 +1,23 @@
-"""The ingestion pipeline.
+"""The ingestion pipeline: load, split, embed, store.
 
-Real parsing, real chunking, a fake embedding model and a fake store: the whole
-orchestration is exercised in milliseconds, with no database and no 2.2 GB of
-weights. That is the payoff of having the pipeline depend on a protocol rather
-than on PostgreSQL.
+Real loading, real splitting, LangChain's DeterministicFakeEmbedding and a fake
+store: the whole orchestration runs in milliseconds, with no database and no
+2.2 GB of weights. That is the payoff of the pipeline depending on the
+`Embeddings` abstraction and on a protocol rather than on PostgreSQL.
 """
 
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import anyio
-import pytest
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 
 from app.db.models import EMBEDDING_DIMENSIONS
-from app.rag.embeddings import EmbeddedChunk
-from app.rag.pipeline import ingest_document
+from app.rag.pipeline import StoredFile, ingest_document
+from tests.fakes import fake_embeddings
 
 DOCUMENT_ID = uuid.uuid4()
 OWNER = "alice-sub-0001"
@@ -24,48 +27,46 @@ class FakeStore:
     """Records what the pipeline did, in order."""
 
     def __init__(self, path: Path | None, mime_type: str = "text/plain") -> None:
-        self._found = (path, mime_type) if path is not None else None
+        self._found = (
+            StoredFile(path=path, mime_type=mime_type, filename="conges.txt")
+            if path is not None
+            else None
+        )
         self.stages: list[str] = []
-        self.result: dict[str, object] | None = None
+        self.result: dict[str, Any] | None = None
         self.failure: tuple[str, bool] | None = None
-        # Counts the entry point, which is how the upload tests prove the
-        # background task was scheduled at all.
-        self.load_calls = 0
 
-    async def load(self, document_id: uuid.UUID, owner_id: str):  # type: ignore[no-untyped-def]
-        self.load_calls += 1
+    async def load(self, document_id: uuid.UUID, owner_id: str) -> StoredFile | None:
         return self._found
 
     async def set_stage(self, document_id: uuid.UUID, stage: str) -> None:
         self.stages.append(stage)
 
-    async def save_result(self, **kwargs: object) -> None:
+    async def save_result(self, **kwargs: Any) -> None:
         self.result = kwargs
 
     async def mark_failed(self, document_id: uuid.UUID, reason: str, retryable: bool) -> None:
         self.failure = (reason, retryable)
 
 
-class FakeModel:
-    @property
-    def name(self) -> str:
-        return "fake-model"
+class ExplodingEmbeddings(Embeddings):
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("the GPU caught fire")
 
-    @property
-    def dimensions(self) -> int:
-        return EMBEDDING_DIMENSIONS
-
-    def encode(self, texts):  # type: ignore[no-untyped-def]
-        return [[0.1] * EMBEDDING_DIMENSIONS for _ in texts]
-
-
-class ExplodingModel(FakeModel):
-    def encode(self, texts):  # type: ignore[no-untyped-def]
+    def embed_query(self, text: str) -> list[float]:
         raise RuntimeError("the GPU caught fire")
 
 
-def run(store: FakeStore, model: FakeModel) -> None:
-    anyio.run(lambda: ingest_document(store, model, document_id=DOCUMENT_ID, owner_id=OWNER))
+def run(store: FakeStore, embeddings: Embeddings | None = None) -> None:
+    anyio.run(
+        lambda: ingest_document(
+            store,
+            embeddings or fake_embeddings(),
+            embedding_model="fake-model",
+            document_id=DOCUMENT_ID,
+            owner_id=OWNER,
+        )
+    )
 
 
 def write_note(tmp_path: Path, content: str = "") -> Path:
@@ -80,11 +81,10 @@ def write_note(tmp_path: Path, content: str = "") -> Path:
 def test_the_stages_follow_the_real_pipeline(tmp_path: Path) -> None:
     store = FakeStore(write_note(tmp_path))
 
-    run(store, FakeModel())
+    run(store)
 
-    # Exactly the four stages of the contract, in order, and each written
-    # BEFORE the step it names - the user sees what is happening, not what
-    # just finished. Parsing needs no announcement: it is the initial state.
+    # Exactly the stages of the contract, in order, and each written BEFORE
+    # the step it names. Parsing needs no announcement: it is the initial state.
     assert store.stages == ["chunking", "embedding", "indexing"]
     assert store.failure is None
 
@@ -92,42 +92,55 @@ def test_the_stages_follow_the_real_pipeline(tmp_path: Path) -> None:
 def test_the_result_carries_what_a_citation_needs(tmp_path: Path) -> None:
     store = FakeStore(write_note(tmp_path))
 
-    run(store, FakeModel())
+    run(store)
 
     assert store.result is not None
     assert store.result["owner_id"] == OWNER
-    assert store.result["model_name"] == "fake-model"
-    # The model name is stored beside the vectors: comparing vectors from two
-    # different models is meaningless, so the mismatch must be detectable.
-    embedded = store.result["embedded"]
-    assert isinstance(embedded, list)
-    assert all(isinstance(item, EmbeddedChunk) for item in embedded)
+    assert store.result["filename"] == "conges.txt"
+    # Stored beside the vectors: comparing vectors from two different models
+    # is meaningless, so the mismatch must be detectable.
+    assert store.result["embedding_model"] == "fake-model"
     assert store.result["page_count"] == 1
 
+    chunks: Sequence[Document] = store.result["chunks"]
+    vectors: Sequence[Sequence[float]] = store.result["vectors"]
+    assert len(chunks) == len(vectors) > 0
+    assert all(len(vector) == EMBEDDING_DIMENSIONS for vector in vectors)
+    assert all(chunk.metadata["page_number"] == 1 for chunk in chunks)
+    assert [chunk.metadata["chunk_index"] for chunk in chunks] == list(range(len(chunks)))
 
-# --- Failures, which is where a background task earns its keep -------------
+
+def test_each_vector_belongs_to_its_own_chunk(tmp_path: Path) -> None:
+    store = FakeStore(write_note(tmp_path, "Premier paragraphe. " * 40 + "\n\n" + "Autre. " * 90))
+    embeddings = fake_embeddings()
+
+    run(store, embeddings)
+
+    assert store.result is not None
+    # DeterministicFakeEmbedding hashes the text, so a misaligned pair would
+    # show here as a vector that belongs to a different chunk.
+    for chunk, vector in zip(store.result["chunks"], store.result["vectors"], strict=True):
+        assert vector == embeddings.embed_query(chunk.page_content)
+
+
+# --- Failures, which is where a background job earns its keep --------------
 
 
 def test_a_document_that_vanished_is_simply_skipped() -> None:
-    # The upload transaction rolled back after the task was scheduled, or the
-    # user deleted the document. Not an error: there is nothing to do.
     store = FakeStore(None)
 
-    run(store, FakeModel())
+    run(store)
 
     assert store.stages == []
     assert store.failure is None
 
 
-def test_a_file_without_usable_text_fails_without_a_retry_button(
-    tmp_path: Path,
-) -> None:
+def test_a_file_without_usable_text_fails_without_a_retry_button(tmp_path: Path) -> None:
     store = FakeStore(write_note(tmp_path, "   \n\n  "))
 
-    run(store, FakeModel())
+    run(store)
 
-    # A blank page will not become readable on a second attempt, so offering
-    # "try again" would only waste the time of whoever believes it.
+    # A blank page will not become readable on a second attempt.
     assert store.failure == ("no_text_found", False)
     assert store.result is None
 
@@ -135,30 +148,32 @@ def test_a_file_without_usable_text_fails_without_a_retry_button(
 def test_an_unsupported_type_is_reported_as_such(tmp_path: Path) -> None:
     store = FakeStore(write_note(tmp_path), mime_type="application/zip")
 
-    run(store, FakeModel())
+    run(store)
 
     assert store.failure == ("unsupported_format", False)
 
 
-def test_an_unexpected_crash_never_escapes_and_stays_retryable(
-    tmp_path: Path,
-) -> None:
+def test_an_unexpected_crash_never_escapes_and_stays_retryable(tmp_path: Path) -> None:
     store = FakeStore(write_note(tmp_path))
 
-    # If this raised, nobody would catch it: the response was sent long ago.
-    # The document would stay `processing` for ever, spinning.
-    run(store, ExplodingModel())
+    # If this raised, nobody would catch it: the job runs in the worker. The
+    # document would stay `processing` for ever, spinning.
+    run(store, ExplodingEmbeddings())
 
     assert store.failure == ("processing_error", True)
     assert store.result is None
 
 
-@pytest.mark.parametrize("stage", ["chunking", "embedding", "indexing"])
-def test_a_failure_leaves_no_half_written_result(tmp_path: Path, stage: str) -> None:
-    store = FakeStore(write_note(tmp_path))
+def test_a_failure_while_saving_is_reported_not_swallowed(tmp_path: Path) -> None:
+    class BrokenStore(FakeStore):
+        async def save_result(self, **kwargs: Any) -> None:
+            raise ConnectionError("the database went away")
 
-    run(store, ExplodingModel())
+    store = BrokenStore(write_note(tmp_path))
 
-    # Whatever stage was reached, the document is never advertised as ready
-    # with an incomplete set of passages.
-    assert store.result is None
+    run(store)
+
+    # The last stage announced was indexing, and it failed: the user gets a
+    # retry button, not a document stuck in `processing`.
+    assert store.stages[-1] == "indexing"
+    assert store.failure == ("processing_error", True)

@@ -9,8 +9,7 @@ rate-limited or ignored. The safest input is the one that was never accepted.
 import re
 import unicodedata
 import uuid
-from collections.abc import Sequence
-from typing import Annotated, Protocol
+from typing import Annotated
 
 from pydantic import BaseModel, StringConstraints
 
@@ -44,25 +43,6 @@ class ChatRequest(BaseModel):
     # question is rejected by FastAPI with a 422 before it reaches any of our
     # code - and long before it could be turned into tokens somebody pays for.
     question: Question
-
-
-class SourceChunk(Protocol):
-    """What a citation needs beyond what the model wrote.
-
-    A Protocol rather than an import of RetrievedChunk: a schema describing
-    what leaves the server has no business depending on the module that talks
-    to the database. Anything carrying these two attributes fits.
-    """
-
-    # Declared as read-only properties rather than plain attributes: a bare
-    # annotation in a Protocol means a MUTABLE attribute, and a frozen
-    # dataclass - which every value object in this codebase is - would not
-    # satisfy it. mypy caught exactly that.
-    @property
-    def document_id(self) -> uuid.UUID: ...
-
-    @property
-    def text(self) -> str: ...
 
 
 _SENTENCE = re.compile(r"(?<=[.;:!?])\s+")
@@ -154,27 +134,24 @@ class ChatResponse(BaseModel):
     is_grounded: bool
 
     @classmethod
-    def of(cls, answer: Answer, sources: Sequence[SourceChunk]) -> "ChatResponse":
+    def of(cls, answer: Answer) -> "ChatResponse":
         """Built field by field, never with from_attributes.
 
         An explicit mapping cannot start leaking a field that somebody adds to
-        the dataclass later. A response schema is a promise about what leaves
-        the server, and promises are written down.
-
-        `sources` is the very list that built the prompt, in the same order, so
-        citation number n refers to sources[n - 1]. Those numbers were already
-        checked against that length in `generation`, which is what makes this
-        indexing safe rather than hopeful.
+        the dataclass later - or a metadata key such as the embedding model or
+        the owner, which travel with every LangChain document. A response
+        schema is a promise about what leaves the server, and promises are
+        written down.
         """
         return cls(
             answer=answer.text,
             citations=[
                 CitationResponse(
                     number=citation.number,
-                    document_id=sources[citation.number - 1].document_id,
+                    document_id=citation.document_id,
                     filename=citation.filename,
                     page_number=citation.page_number,
-                    snippet=_snippet(sources[citation.number - 1].text, answer.text),
+                    snippet=_snippet(citation.passage, answer.text),
                 )
                 for citation in answer.citations
             ],

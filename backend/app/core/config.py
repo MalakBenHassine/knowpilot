@@ -72,10 +72,16 @@ class Settings(BaseSettings):
     # the rest of the application still starts. An optional external service
     # must never be able to prevent the process from booting.
     groq_api_key: str = ""
-    # One line, because LanguageModel is a Protocol. The documentation lists
-    # models this account cannot reach, so this value was chosen from the
-    # models endpoint queried with the real key.
+    # The documentation lists models this account cannot reach, so this value
+    # was chosen from the models endpoint queried with the real key.
     groq_model: str = "openai/gpt-oss-120b"
+
+    # --- LangSmith tracing (ADR-0014) ---
+    # LangChain sends every run - prompt, passages, answer - to LangSmith when
+    # LANGSMITH_TRACING is set. The passages are the private documents of our
+    # users, so tracing is refused at startup unless this flag says someone
+    # decided it on purpose (a self-hosted LangSmith, or a test account).
+    langsmith_tracing_allowed: bool = False
 
     # --- Retrieval policy ---
     # Cosine distance above which a passage is treated as not about the

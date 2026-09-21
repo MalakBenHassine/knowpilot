@@ -9,7 +9,12 @@ dependencies = [
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.141.1",
     "joserfc>=1.7.5",
-    "pgvector>=0.5.0",
+    "langchain-core>=1.6.3",
+    "langchain-groq>=1.1.3",
+    "langchain-huggingface>=1.2.2",
+    "langchain-postgres>=0.0.18",
+    "langchain-text-splitters>=1.1.2",
+    "pgvector>=0.3.6,<0.4",
     "pydantic-settings>=2.15.0",
     "pypdf>=6.19.0",
     "redis>=6",
@@ -41,6 +46,13 @@ select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
+
+# pgvector was pinned below 0.4 by langchain-postgres (ADR-0014), and those
+# releases ship no type information. Scoped to that one package, so a missing
+# stub anywhere else still fails the check.
+[[tool.mypy.overrides]]
+module = ["pgvector.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

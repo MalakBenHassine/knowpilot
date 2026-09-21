@@ -34,11 +34,10 @@ from app.db import documents as repository
 from app.db import vector_store
 from app.db.ingestion import DatabaseIngestionStore
 from app.db.session import create_engine, create_session_factory
-from app.rag.embeddings import embed_query
-from app.rag.generation import Answer, Passage, answer_question
-from app.rag.groq import GroqLanguageModel
-from app.rag.model import LocalEmbeddingModel
+from app.rag.generation import ANSWER_PROMPT, Answer, answer_question
+from app.rag.llm import build_answer_chain, create_chat_model
 from app.rag.pipeline import ingest_document
+from app.rag.retrieval import OwnerScopedRetriever
 from evals.dataset import ALL_OWNERS, CASES, FIXTURES, Case
 
 GREEN, RED, YELLOW, GREY, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[0m"
@@ -88,14 +87,16 @@ def judge(case: Case, answer: Answer) -> list[str]:
     return failures
 
 
-async def ingest_fixtures(factory, model, storage: FileStorage) -> list[uuid.UUID]:  # type: ignore[no-untyped-def]
+async def ingest_fixtures(  # type: ignore[no-untyped-def]
+    factory, vectors, embeddings, settings, storage: FileStorage
+) -> list[uuid.UUID]:
     """Put the fixtures through the real pipeline, in process.
 
     Not through the queue: the worker is another deployment concern, and an
     evaluation that needs a second process running is an evaluation people
     skip. The pipeline code is identical either way.
     """
-    store = DatabaseIngestionStore(factory)
+    store = DatabaseIngestionStore(factory, vectors)
     created: list[uuid.UUID] = []
 
     for fixture in FIXTURES:
@@ -118,32 +119,30 @@ async def ingest_fixtures(factory, model, storage: FileStorage) -> list[uuid.UUI
             )
             await session.commit()
 
-        await ingest_document(store, model, document_id=document_id, owner_id=fixture.owner_id)
+        await ingest_document(
+            store,
+            embeddings,
+            embedding_model=settings.embedding_model,
+            document_id=document_id,
+            owner_id=fixture.owner_id,
+        )
         created.append(document_id)
         print(f"{GREY}  indexed {fixture.filename} for {fixture.owner_id}{RESET}")
 
     return created
 
 
-async def run_case(case: Case, factory, model, llm, settings) -> Outcome:  # type: ignore[no-untyped-def]
-    """The exact chain POST /api/chat runs, minus HTTP and the quota."""
+async def run_case(case: Case, vectors, chain, settings) -> Outcome:  # type: ignore[no-untyped-def]
+    """The exact retriever and chain POST /api/chat runs, minus HTTP and quota."""
     started = time.monotonic()
-    vector = embed_query(case.question, model)
-
-    async with factory() as session:
-        found = await vector_store.search_chunks(
-            session,
-            owner_id=case.asked_by,
-            query_vector=vector,
-            limit=settings.top_k,
-            max_distance=settings.max_distance,
-        )
-
-    passages = [
-        Passage(text=chunk.text, filename=chunk.filename, page_number=chunk.page_number)
-        for chunk in found
-    ]
-    answer = await answer_question(case.question, passages, llm)
+    retriever = OwnerScopedRetriever(
+        vector_store=vectors,
+        owner_id=case.asked_by,
+        k=settings.top_k,
+        max_distance=settings.max_distance,
+    )
+    passages = await retriever.ainvoke(case.question)
+    answer = await answer_question(case.question, passages, chain)
     return Outcome(
         case=case,
         answer=answer,
@@ -214,18 +213,23 @@ async def main() -> int:
         f"max_distance={settings.max_distance}  top_k={settings.top_k}"
     )
     print(f"{GREY}loading the embedding model...{RESET}")
-    model = LocalEmbeddingModel.load(settings.embedding_model, settings.embedding_cache_dir)
+    embeddings = vector_store.load_checked_embeddings(
+        settings.embedding_model, settings.embedding_cache_dir
+    )
 
     engine = create_engine(settings.database_url)
     factory = create_session_factory(engine)
     storage = FileStorage(Path(settings.upload_root))
+    vectors = await vector_store.create_vector_store(engine, embeddings)
 
     async with httpx.AsyncClient() as client:
-        llm = GroqLanguageModel(settings.groq_api_key, settings.groq_model, client)
+        chain = build_answer_chain(
+            ANSWER_PROMPT, create_chat_model(settings.groq_api_key, settings.groq_model, client)
+        )
         try:
             await cleanup(factory, storage)  # in case a previous run was interrupted
-            await ingest_fixtures(factory, model, storage)
-            outcomes = [await run_case(case, factory, model, llm, settings) for case in CASES]
+            await ingest_fixtures(factory, vectors, embeddings, settings, storage)
+            outcomes = [await run_case(case, vectors, chain, settings) for case in CASES]
             code = report(outcomes)
         finally:
             await cleanup(factory, storage)

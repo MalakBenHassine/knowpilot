@@ -1,217 +1,251 @@
-"""Vector storage and, above all, isolation between accounts.
+"""The LangChain PGVectorStore over our table, and above all tenant isolation.
 
 These tests need a real PostgreSQL with pgvector, so they are opt-in:
 
     KP_RUN_DB_TESTS=1 uv run pytest tests/test_vector_store.py -v
 
-They run inside a transaction that is rolled back at the end, so they can be
-run against the development database without leaving anything behind.
+Unlike the rest of the database tests, they cannot run inside a rolled-back
+transaction: PGVectorStore takes its own connections from the pool and commits
+each write, so it would never see a row written by an uncommitted session.
+Each test therefore uses owners that are unique to the run, and deletes every
+document it created at the end - the cascade removes the chunks.
 """
 
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_postgres import PGVectorStore
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from app.db.models import EMBEDDING_DIMENSIONS, Document
+from app.core.config import get_settings
+from app.db.models import EMBEDDING_DIMENSIONS, DocumentChunk
+from app.db.models import Document as DocumentRow
+from app.db.session import create_engine
 from app.db.vector_store import (
+    chunk_id,
+    create_vector_store,
     delete_document,
     replace_document_chunks,
-    search_chunks,
 )
-from app.rag.chunking import Chunk
-from app.rag.embeddings import EmbeddedChunk
+from app.rag.retrieval import OwnerScopedRetriever
 from tests.conftest import requires_database
 
-ALICE = "alice-sub-0001"
-BOB = "bob-sub-0002"
 MODEL = "BAAI/bge-m3"
 
 pytestmark = [pytest.mark.anyio, requires_database]
 
 
 def unit_vector(axis: int) -> list[float]:
-    """A vector of length 1 pointing along one axis.
-
-    Two different axes are exactly as far apart as cosine distance allows for
-    positive vectors, which makes the assertions unambiguous.
-    """
+    """Length 1 along one axis: two axes are at cosine distance exactly 1."""
     vector = [0.0] * EMBEDDING_DIMENSIONS
     vector[axis] = 1.0
     return vector
 
 
-async def make_document(session: AsyncSession, owner_id: str) -> uuid.UUID:
-    document = Document(
-        owner_id=owner_id,
-        filename="contract.pdf",
-        mime_type="application/pdf",
-        size_bytes=1024,
-        # Unique per run so re-running the tests never trips the
-        # (owner_id, content_hash) constraint.
-        content_hash=uuid.uuid4().hex,
-        storage_path=f"/data/{uuid.uuid4()}",
-        status="ready",
-    )
-    session.add(document)
-    await session.flush()
-    return document.id
+class AxisEmbeddings(Embeddings):
+    """Every question is embedded along axis 0: the query of these tests."""
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [unit_vector(0) for _ in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return unit_vector(0)
 
 
-def embedded(texts_and_axes: list[tuple[str, int]]) -> list[EmbeddedChunk]:
-    return [
-        EmbeddedChunk(
-            chunk=Chunk(index=index, text=text, page_number=index + 1),
-            vector=unit_vector(axis),
+@dataclass
+class Db:
+    engine: AsyncEngine
+    store: PGVectorStore
+    alice: str
+    bob: str
+
+    async def document(self, owner_id: str, filename: str = "contract.pdf") -> uuid.UUID:
+        # expire_on_commit=False: the id is read after the commit, and an
+        # expired attribute would trigger a lazy load outside any greenlet.
+        factory = async_sessionmaker(self.engine, expire_on_commit=False)
+        async with factory() as session:
+            row = DocumentRow(
+                owner_id=owner_id,
+                filename=filename,
+                mime_type="application/pdf",
+                size_bytes=1024,
+                content_hash=uuid.uuid4().hex,
+                storage_path=f"/data/{uuid.uuid4()}",
+                status="ready",
+            )
+            session.add(row)
+            await session.commit()
+            return row.id
+
+    async def index(
+        self, owner_id: str, document_id: uuid.UUID, texts_and_axes: list[tuple[str, int]]
+    ) -> int:
+        chunks = [
+            Document(text, metadata={"chunk_index": index, "page_number": index + 1})
+            for index, (text, _) in enumerate(texts_and_axes)
+        ]
+        return await replace_document_chunks(
+            self.store,
+            owner_id=owner_id,
+            document_id=document_id,
+            filename="contract.pdf",
+            chunks=chunks,
+            vectors=[unit_vector(axis) for _, axis in texts_and_axes],
+            embedding_model=MODEL,
         )
-        for index, (text, axis) in enumerate(texts_and_axes)
-    ]
+
+    async def count(self, document_id: uuid.UUID) -> int:
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                select(func.count())
+                .select_from(DocumentChunk)
+                .where(DocumentChunk.document_id == document_id)
+            )
+            return int(result.scalar_one())
+
+    def retriever(self, owner_id: str, max_distance: float = 0.6) -> OwnerScopedRetriever:
+        return OwnerScopedRetriever(
+            vector_store=self.store, owner_id=owner_id, k=8, max_distance=max_distance
+        )
+
+
+@pytest.fixture
+async def db() -> AsyncIterator[Db]:
+    engine = create_engine(get_settings().database_url)
+    suffix = uuid.uuid4().hex[:8]
+    handle = Db(
+        engine=engine,
+        store=await create_vector_store(engine, AxisEmbeddings()),
+        alice=f"test-alice-{suffix}",
+        bob=f"test-bob-{suffix}",
+    )
+    yield handle
+    async with engine.begin() as connection:
+        await connection.execute(
+            delete(DocumentRow).where(DocumentRow.owner_id.in_([handle.alice, handle.bob]))
+        )
+    await engine.dispose()
 
 
 # --- Writing and reading back ----------------------------------------------
 
 
-async def test_chunks_are_written_and_found_by_their_owner(
-    session: AsyncSession,
-) -> None:
-    document_id = await make_document(session, ALICE)
-    await replace_document_chunks(
-        session,
-        owner_id=ALICE,
-        document_id=document_id,
-        embedded=embedded([("les conges payes sont de 25 jours", 0)]),
-        embedding_model=MODEL,
-    )
+async def test_chunks_are_written_and_found_by_their_owner(db: Db) -> None:
+    document_id = await db.document(db.alice, "conges.pdf")
+    await db.index(db.alice, document_id, [("les conges payes sont de 25 jours", 0)])
 
-    found = await search_chunks(session, owner_id=ALICE, query_vector=unit_vector(0))
+    found = await db.retriever(db.alice).ainvoke("combien de conges ?")
 
     assert len(found) == 1
-    assert found[0].page_number == 1
-    assert found[0].distance == pytest.approx(0.0, abs=1e-6)
+    metadata = found[0].metadata
+    # Every field a citation needs comes back from the row itself.
+    assert metadata["document_id"] == document_id
+    assert metadata["filename"] == "contract.pdf"
+    assert metadata["page_number"] == 1
+    assert metadata["distance"] == pytest.approx(0.0, abs=1e-6)
 
 
-async def test_results_come_back_closest_first(session: AsyncSession) -> None:
-    document_id = await make_document(session, ALICE)
-    await replace_document_chunks(
-        session,
-        owner_id=ALICE,
-        document_id=document_id,
-        embedded=embedded([("loin", 5), ("proche", 0), ("moyen", 3)]),
-        embedding_model=MODEL,
-    )
+async def test_results_come_back_closest_first(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [("loin", 5), ("proche", 0), ("moyen", 3)])
 
-    found = await search_chunks(session, owner_id=ALICE, query_vector=unit_vector(0))
+    found = await db.retriever(db.alice, max_distance=2.0).ainvoke("question")
 
-    assert found[0].text == "proche"
-    assert [item.distance for item in found] == sorted(item.distance for item in found)
+    assert found[0].page_content == "proche"
+    distances = [doc.metadata["distance"] for doc in found]
+    assert distances == sorted(distances)
 
 
-async def test_a_weak_match_can_be_rejected(session: AsyncSession) -> None:
-    document_id = await make_document(session, ALICE)
-    await replace_document_chunks(
-        session,
-        owner_id=ALICE,
-        document_id=document_id,
-        embedded=embedded([("sans rapport", 7)]),
-        embedding_model=MODEL,
-    )
+async def test_a_weak_match_is_rejected(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [("sans rapport", 7)])
 
     # Without a ceiling, retrieval always returns *something*, and the model
     # answers confidently from the least bad passage in the library.
-    found = await search_chunks(
-        session, owner_id=ALICE, query_vector=unit_vector(0), max_distance=0.5
-    )
-
-    assert found == []
+    assert await db.retriever(db.alice, max_distance=0.5).ainvoke("question") == []
 
 
-# --- The test this whole module exists for ---------------------------------
+# --- 🔒 The test this whole module exists for ------------------------------
 
 
-async def test_a_search_never_reaches_another_owner(session: AsyncSession) -> None:
+async def test_a_search_never_reaches_another_owner(db: Db) -> None:
     """The passage of another account must not surface, whatever its score."""
-    alice_document = await make_document(session, ALICE)
-    bob_document = await make_document(session, BOB)
+    alice_document = await db.document(db.alice)
+    bob_document = await db.document(db.bob)
+    # Alice owns a mediocre match; Bob owns a PERFECT one.
+    await db.index(db.alice, alice_document, [("note de service de alice", 4)])
+    await db.index(db.bob, bob_document, [("le salaire confidentiel de bob", 0)])
 
-    # Alice owns a mediocre match for the query.
-    await replace_document_chunks(
-        session,
-        owner_id=ALICE,
-        document_id=alice_document,
-        embedded=embedded([("note de service de alice", 4)]),
-        embedding_model=MODEL,
-    )
-    # Bob owns a PERFECT match: same vector as the query.
-    await replace_document_chunks(
-        session,
-        owner_id=BOB,
-        document_id=bob_document,
-        embedded=embedded([("le salaire confidentiel de bob est de 4200 euros", 0)]),
-        embedding_model=MODEL,
-    )
+    found = await db.retriever(db.alice, max_distance=2.0).ainvoke("salaire")
 
-    found = await search_chunks(session, owner_id=ALICE, query_vector=unit_vector(0))
+    # Ranking would have put Bob first. The owner filter is a WHERE clause
+    # PostgreSQL applies before ranking.
+    assert [doc.metadata["document_id"] for doc in found] == [alice_document]
+    assert all("bob" not in doc.page_content for doc in found)
 
-    # Ranking would have put Bob first. The owner filter runs before ranking.
-    assert [item.document_id for item in found] == [alice_document]
-    assert all("bob" not in item.text for item in found)
+
+async def test_a_retriever_without_an_owner_cannot_be_built(db: Db) -> None:
+    # The unsafe retriever is not a mistake someone can make: it does not exist.
+    with pytest.raises(ValueError):
+        db.retriever("")
 
 
 # --- Idempotence and deletion ----------------------------------------------
 
 
-async def test_indexing_the_same_document_twice_does_not_duplicate(
-    session: AsyncSession,
-) -> None:
-    document_id = await make_document(session, ALICE)
-    chunks = embedded([("un", 0), ("deux", 1)])
+async def test_indexing_the_same_document_twice_does_not_duplicate(db: Db) -> None:
+    document_id = await db.document(db.alice)
 
     for _ in range(2):
-        await replace_document_chunks(
-            session,
-            owner_id=ALICE,
-            document_id=document_id,
-            embedded=chunks,
-            embedding_model=MODEL,
-        )
+        await db.index(db.alice, document_id, [("un", 0), ("deux", 1)])
 
-    # A background task that crashes and is retried must converge, not double.
-    found = await search_chunks(session, owner_id=ALICE, query_vector=unit_vector(0), limit=100)
-    assert len(found) == 2
+    # A job that crashes and is retried must converge, not double.
+    assert await db.count(document_id) == 2
 
 
-async def test_deleting_a_document_removes_its_chunks(session: AsyncSession) -> None:
-    document_id = await make_document(session, ALICE)
-    await replace_document_chunks(
-        session,
-        owner_id=ALICE,
-        document_id=document_id,
-        embedded=embedded([("a supprimer", 0)]),
-        embedding_model=MODEL,
-    )
+async def test_a_shorter_reindex_leaves_no_stale_chunk(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [("un", 0), ("deux", 1), ("trois", 2)])
 
-    assert await delete_document(session, owner_id=ALICE, document_id=document_id)
-    await session.flush()
+    await db.index(db.alice, document_id, [("seul", 0)])
 
-    # The cascade is the database doing it, not the application remembering to.
-    # This is what pgvector buys over a separate vector store.
-    assert await search_chunks(session, owner_id=ALICE, query_vector=unit_vector(0)) == []
+    # Deterministic ids alone would overwrite chunk 0 and leave 1 and 2 behind
+    # - passages of the old cut, answering questions forever. The delete
+    # before the insert is what removes them.
+    assert await db.count(document_id) == 1
 
 
-async def test_deleting_the_document_of_another_owner_does_nothing(
-    session: AsyncSession,
-) -> None:
-    document_id = await make_document(session, BOB)
-    await replace_document_chunks(
-        session,
-        owner_id=BOB,
-        document_id=document_id,
-        embedded=embedded([("document de bob", 0)]),
-        embedding_model=MODEL,
-    )
+async def test_chunk_ids_are_deterministic() -> None:
+    document_id = uuid.uuid4()
 
-    deleted = await delete_document(session, owner_id=ALICE, document_id=document_id)
+    assert chunk_id(document_id, 3) == chunk_id(document_id, 3)
+    assert chunk_id(document_id, 3) != chunk_id(document_id, 4)
 
-    # False here, 404 in the API: never 403, which would confirm the id exists.
-    assert deleted is False
-    assert await search_chunks(session, owner_id=BOB, query_vector=unit_vector(0)) != []
+
+async def test_deleting_a_document_removes_its_chunks(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [("a supprimer", 0)])
+
+    async with async_sessionmaker(db.engine)() as session:
+        assert await delete_document(session, owner_id=db.alice, document_id=document_id)
+        await session.commit()
+
+    # The cascade is the database doing it, not the application remembering
+    # to - the reason the LangChain store points at OUR table.
+    assert await db.count(document_id) == 0
+
+
+async def test_reindexing_cannot_touch_another_owners_chunks(db: Db) -> None:
+    bob_document = await db.document(db.bob)
+    await db.index(db.bob, bob_document, [("document de bob", 0)])
+
+    # Alice's pipeline, pointed at Bob's document by a wrong identifier: the
+    # delete is scoped by owner as well as by document, so nothing happens.
+    await db.index(db.alice, bob_document, [])
+
+    assert await db.count(bob_document) == 1

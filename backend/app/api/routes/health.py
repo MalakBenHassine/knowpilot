@@ -4,9 +4,9 @@ from fastapi import APIRouter, Response, status
 
 router = APIRouter(prefix="/health", tags=["health"])
 
-# Readiness checks are registered here as the dependencies arrive
-# (PostgreSQL, Redis, Chroma). Empty today, so the service is ready as soon as
-# it answers.
+# Readiness checks are registered by the lifespan as each dependency is built
+# (database, cache, embeddings, generation). Empty until then, so a process
+# without them is ready as soon as it answers.
 type Check = Callable[[], Awaitable[bool]]
 READINESS_CHECKS: dict[str, Check] = {}
 

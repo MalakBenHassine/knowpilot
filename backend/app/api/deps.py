@@ -1,9 +1,11 @@
 """Shared dependencies: session lookup, authentication, CSRF and database."""
 
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
+from langchain_core.runnables import Runnable
+from langchain_core.vectorstores import VectorStore
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
@@ -11,10 +13,6 @@ from app.core.queue import JobQueue
 from app.core.quota import QuotaTracker
 from app.core.session import SessionData, SessionStore
 from app.core.storage import FileStorage
-from app.db.ingestion import DatabaseIngestionStore
-from app.rag.embeddings import EmbeddingModel
-from app.rag.generation import LanguageModel
-from app.rag.pipeline import IngestionStore
 
 
 def get_config() -> Settings:
@@ -43,20 +41,19 @@ def get_file_storage(request: Request) -> FileStorage:
 Storage = Annotated[FileStorage, Depends(get_file_storage)]
 
 
-def get_embedding_model(request: Request) -> EmbeddingModel:
-    """The loaded model, or 503.
+def get_vector_store(request: Request) -> VectorStore:
+    """The LangChain vector store over document_chunks, or 503.
 
-    Refusing the upload is more honest than accepting a job we cannot run: the
-    user keeps their file and can try again, instead of watching a document
-    fail a minute later for a reason that has nothing to do with it.
+    None means the embedding model is disabled in this process: a question
+    cannot be embedded, so it cannot be searched.
     """
-    model: EmbeddingModel | None = request.app.state.embedding_model
-    if model is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Indexing is unavailable")
-    return model
+    store: VectorStore | None = request.app.state.vector_store
+    if store is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Answering is unavailable")
+    return store
 
 
-Model = Annotated[EmbeddingModel, Depends(get_embedding_model)]
+Vectors = Annotated[VectorStore, Depends(get_vector_store)]
 
 
 def get_job_queue(request: Request) -> JobQueue:
@@ -68,21 +65,21 @@ def get_job_queue(request: Request) -> JobQueue:
 Queue = Annotated[JobQueue, Depends(get_job_queue)]
 
 
-def get_language_model(request: Request) -> LanguageModel:
-    """The configured provider, or 503.
+def get_answer_chain(request: Request) -> Runnable[dict[str, Any], str]:
+    """The LCEL answer chain (prompt | ChatGroq | parser), or 503.
 
     None means no API key was configured. Answering 503 keeps the rest of
     the application alive: uploads, listings and deletions have nothing to
     do with generation, and an optional external service must never be able
     to take the whole product down with it.
     """
-    model: LanguageModel | None = request.app.state.language_model
-    if model is None:
+    chain: Runnable[dict[str, Any], str] | None = request.app.state.answer_chain
+    if chain is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Answering is unavailable")
-    return model
+    return chain
 
 
-Llm = Annotated[LanguageModel, Depends(get_language_model)]
+AnswerChain = Annotated[Runnable[dict[str, Any], str], Depends(get_answer_chain)]
 
 
 def get_quota_tracker(request: Request) -> QuotaTracker:
@@ -92,18 +89,6 @@ def get_quota_tracker(request: Request) -> QuotaTracker:
 
 
 Quota = Annotated[QuotaTracker, Depends(get_quota_tracker)]
-
-
-def get_ingestion_store(request: Request) -> IngestionStore:
-    """Persistence for the background pipeline.
-
-    Built from the factory rather than from the request session: by the time
-    the task runs, the request session is closed and committed.
-    """
-    return DatabaseIngestionStore(request.app.state.session_factory)
-
-
-Ingestion = Annotated[IngestionStore, Depends(get_ingestion_store)]
 
 
 async def db_session(request: Request) -> AsyncIterator[AsyncSession]:

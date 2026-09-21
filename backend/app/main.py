@@ -16,15 +16,18 @@ from app.core.queue import ArqJobQueue, create_queue
 from app.core.quota import QuotaTracker
 from app.core.session import SessionStore
 from app.core.storage import FileStorage
-from app.db.models import EMBEDDING_DIMENSIONS
+from app.core.tracing import ensure_tracing_is_deliberate
 from app.db.session import create_engine, create_session_factory
-from app.rag.groq import GroqLanguageModel
-from app.rag.model import LocalEmbeddingModel
+from app.db.vector_store import create_vector_store, load_checked_embeddings
+from app.rag.generation import ANSWER_PROMPT
+from app.rag.llm import build_answer_chain, create_chat_model
 
 settings = get_settings()
 # Before anything else: a module that logs during import would otherwise write
 # into a void.
 configure_logging(settings.log_level)
+# Before any chain exists: a trace of a question carries users' documents.
+ensure_tracing_is_deliberate(allowed=settings.langsmith_tracing_allowed)
 
 
 @asynccontextmanager
@@ -67,22 +70,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Blocking the event loop is correct at this point: nothing else is running
     # yet, and FastAPI serves nothing until the lifespan has finished - so the
     # readiness probe physically cannot answer "ready" while the weights load.
-    app.state.embedding_model = None
+    #
+    # The API only embeds questions; the worker embeds documents. Both load the
+    # same model, from the same setting, because a question and a passage must
+    # land in the same vector space for their distance to mean anything.
+    app.state.vector_store = None
     if settings.embeddings_enabled:
-        model = LocalEmbeddingModel.load(settings.embedding_model, settings.embedding_cache_dir)
-        # The column is vector(1024). A model of a different size would write
-        # rows PostgreSQL rejects, or worse, vectors nobody can compare. Fail
-        # here, loudly, rather than halfway through somebody's first upload.
-        if model.dimensions != EMBEDDING_DIMENSIONS:
-            raise RuntimeError(
-                f"{model.name} produces {model.dimensions} dimensions, "
-                f"but the schema stores {EMBEDDING_DIMENSIONS}. "
-                "Changing the model requires a migration and a full re-index."
-            )
-        app.state.embedding_model = model
+        embeddings = load_checked_embeddings(settings.embedding_model, settings.embedding_cache_dir)
+        app.state.vector_store = await create_vector_store(engine, embeddings)
 
         async def embeddings_ready() -> bool:
-            return app.state.embedding_model is not None
+            return app.state.vector_store is not None
 
         health.READINESS_CHECKS["embeddings"] = embeddings_ready
 
@@ -105,17 +103,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # client means a fresh TCP connection and a fresh TLS handshake, paid on
     # every question. Closed below, in reverse order of construction.
     http_client = httpx.AsyncClient()
-    app.state.language_model = None
+    app.state.answer_chain = None
     if settings.generation_enabled:
-        app.state.language_model = GroqLanguageModel(
-            settings.groq_api_key, settings.groq_model, http_client
+        # Built once: an LCEL chain is immutable and safe to share between
+        # concurrent requests, so there is nothing to gain from one per call.
+        app.state.answer_chain = build_answer_chain(
+            ANSWER_PROMPT,
+            create_chat_model(settings.groq_api_key, settings.groq_model, http_client),
         )
 
         async def generation_ready() -> bool:
             # Deliberately NOT a call to the provider: a readiness probe runs
             # every few seconds, and spending the daily budget to prove the
             # budget exists would be its own outage.
-            return app.state.language_model is not None
+            return app.state.answer_chain is not None
 
         health.READINESS_CHECKS["generation"] = generation_ready
     else:

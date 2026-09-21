@@ -5,10 +5,9 @@ Redis instance and the uploads volume with the API, and shares no event loop
 with it - which is the entire point. A long document now competes with other
 ingestions, never with somebody waiting for an answer.
 
-Nothing in `app/rag/pipeline.py` changed to make this possible. The pipeline
-already took an `IngestionStore` and an `EmbeddingModel` rather than reaching
-for a database or a model of its own, so moving it into another process was a
-matter of building those two objects somewhere else.
+The pipeline takes an `IngestionStore` and LangChain `Embeddings` rather than
+reaching for a database or a model of its own, so running it in another
+process is a matter of building those two objects here.
 """
 
 from __future__ import annotations
@@ -23,10 +22,10 @@ from arq.connections import RedisSettings
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.queue import INGEST_JOB
+from app.core.tracing import ensure_tracing_is_deliberate
 from app.db.ingestion import DatabaseIngestionStore
-from app.db.models import EMBEDDING_DIMENSIONS
 from app.db.session import create_engine, create_session_factory
-from app.rag.model import LocalEmbeddingModel
+from app.db.vector_store import create_vector_store, load_checked_embeddings
 from app.rag.pipeline import ingest_document
 
 if TYPE_CHECKING:
@@ -63,34 +62,33 @@ async def ingest(context: dict[str, Any], document_id: str, owner_id: str) -> No
     """
     await ingest_document(
         context["store"],
-        context["model"],
+        context["embeddings"],
+        embedding_model=settings.embedding_model,
         document_id=uuid.UUID(document_id),
         owner_id=owner_id,
     )
 
 
 async def startup(context: dict[str, Any]) -> None:
-    """Build the database and the model once, not once per job.
+    """Build the database, the model and the vector store once, not per job.
 
     Loading BGE-M3 costs roughly twenty seconds and 2.2 GB. Paying that per job
     would make a five-second ingestion take half a minute, and a burst of
     uploads would spend most of its time loading the same weights again.
     """
+    # The worker handles every document of every user: the same privacy rule
+    # as the API, checked before anything is loaded.
+    ensure_tracing_is_deliberate(allowed=settings.langsmith_tracing_allowed)
+
     engine = create_engine(settings.database_url)
     context["engine"] = engine
-    context["store"] = DatabaseIngestionStore(create_session_factory(engine))
 
-    model = LocalEmbeddingModel.load(settings.embedding_model, settings.embedding_cache_dir)
-    # The column is vector(1024). A worker writing a different width would
-    # produce rows PostgreSQL rejects, or worse, vectors nobody can compare.
-    # Fail here rather than halfway through an upload.
-    if model.dimensions != EMBEDDING_DIMENSIONS:
-        raise RuntimeError(
-            f"{model.name} produces {model.dimensions} dimensions, "
-            f"but the schema stores {EMBEDDING_DIMENSIONS}."
-        )
-    context["model"] = model
-    logger.info("ingestion worker ready with %s", model.name)
+    embeddings = load_checked_embeddings(settings.embedding_model, settings.embedding_cache_dir)
+    context["embeddings"] = embeddings
+    context["store"] = DatabaseIngestionStore(
+        create_session_factory(engine), await create_vector_store(engine, embeddings)
+    )
+    logger.info("ingestion worker ready with %s", settings.embedding_model)
 
 
 async def shutdown(context: dict[str, Any]) -> None:

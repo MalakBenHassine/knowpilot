@@ -114,6 +114,13 @@ class DocumentChunk(Base):
     # join.
     owner_id: Mapped[str] = mapped_column(String(255), index=True)
 
+    # Denormalised as well, and for a different reason: LangChain returns each
+    # passage as a Document whose metadata is this row. Carrying the filename
+    # here means a citation names its file without a join or a second query at
+    # answer time. Safe because a filename never changes after upload; the day
+    # renaming exists, it must update both tables in one transaction.
+    filename: Mapped[str] = mapped_column(String(255))
+
     chunk_index: Mapped[int]
     # Carried all the way from parsing so an answer can cite a page number.
     page_number: Mapped[int]
