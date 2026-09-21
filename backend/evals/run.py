@@ -1,6 +1,7 @@
 """Measure the assistant against the real stack.
 
-    uv run python -m evals.run
+    uv run python -m evals.run                 every case
+    uv run python -m evals.run NAME [NAME...]  only these, to check one fix cheaply
 
 Real embeddings, real pgvector, real GroqCloud. Nothing is faked, because the
 question being asked is not "does the code work" - two hundred tests answer
@@ -27,8 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+from langchain_core.callbacks import get_usage_metadata_callback
 
-from app.core.clock import today
 from app.core.config import get_settings
 from app.core.storage import FileStorage
 from app.db import documents as repository
@@ -36,10 +37,16 @@ from app.db import vector_store
 from app.db.ingestion import DatabaseIngestionStore
 from app.db.session import create_engine, create_session_factory
 from app.rag.generation import ANSWER_PROMPT, Answer, answer_question
-from app.rag.llm import build_answer_chain, create_chat_model
+from app.rag.llm import (
+    QuotaExhaustedError,
+    build_advisory_chain,
+    build_answer_chain,
+    create_chat_model,
+)
 from app.rag.pipeline import ingest_document
 from app.rag.retrieval import RetrieverFactory
-from evals.dataset import ALL_OWNERS, CASES, FIXTURES, Case
+from app.rag.subjects import SUBJECT_PROMPT, SubjectCheck, Subjects
+from evals.dataset import ALL_OWNERS, CASES, EVAL_TODAY, FIXTURES, Case
 
 GREEN, RED, YELLOW, GREY, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[0m"
 
@@ -51,6 +58,8 @@ class Outcome:
     passages: int
     seconds: float
     failures: list[str]
+    # Input tokens of the answering model: what a change of retrieval costs.
+    input_tokens: int = 0
 
     @property
     def passed(self) -> bool:
@@ -67,12 +76,13 @@ def judge(case: Case, answer: Answer) -> list[str]:
     ones are not.
     """
     failures: list[str] = []
-    if answer.is_grounded != case.expect_grounded:
+    if case.expect_grounded is not None and answer.is_grounded != case.expect_grounded:
         expected = "an answer" if case.expect_grounded else "a refusal"
         failures.append(f"expected {expected}")
 
     text = answer.text.lower()
-    for needle in case.must_contain:
+    # An allowed refusal has no text to check; an answer always does.
+    for needle in case.must_contain if answer.is_grounded else ():
         if needle.lower() not in text:
             failures.append(f"missing {needle!r}")
     for needle in case.must_not_contain:
@@ -81,10 +91,24 @@ def judge(case: Case, answer: Answer) -> list[str]:
             # than a quality problem.
             failures.append(f"LEAKED {needle!r}")
 
-    if case.must_cite and not any(c.filename == case.must_cite for c in answer.citations):
+    if (
+        answer.is_grounded
+        and case.must_cite
+        and not any(c.filename == case.must_cite for c in answer.citations)
+    ):
         failures.append(f"did not cite {case.must_cite}")
     if case.expect_grounded and not answer.citations:
         failures.append("grounded but uncited")
+
+    # The notice of ADR-0018, in both directions: missing where the document
+    # never names the subject, or shown where it does.
+    if answer.is_grounded:
+        shown = {subject.lower() for subject in answer.not_in_documents}
+        wanted = {subject.lower() for subject in case.expect_not_in_documents}
+        for subject in wanted - shown:
+            failures.append(f"no notice for {subject!r}")
+        for subject in shown - wanted:
+            failures.append(f"false notice for {subject!r}")
     return failures
 
 
@@ -133,17 +157,52 @@ async def ingest_fixtures(  # type: ignore[no-untyped-def]
     return created
 
 
-async def run_case(case: Case, retrievers: RetrieverFactory, chain) -> Outcome:  # type: ignore[no-untyped-def]
-    """The exact retriever and chain POST /api/chat runs, minus HTTP and quota."""
+async def _patiently(ask, attempts: int = 4):  # type: ignore[no-untyped-def]
+    """Wait out the provider's per-minute limit instead of dying on it.
+
+    The free tier allows 8000 tokens a minute and a question costs about 2700
+    with its output budget, so twenty questions in a row are bound to hit it.
+    The API surfaces that to the user as a 429 with a delay; an evaluation can
+    afford to wait the delay it was given.
+    """
+    for attempt in range(attempts):
+        try:
+            return await ask()
+        except QuotaExhaustedError as exc:
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(exc.retry_after + 1)
+    raise AssertionError("unreachable")
+
+
+async def run_case(  # type: ignore[no-untyped-def]
+    case: Case, retrievers: RetrieverFactory, chain, check: SubjectCheck | None, model: str
+) -> Outcome:
+    """The exact steps POST /api/chat runs, minus HTTP and quota."""
     started = time.monotonic()
-    passages = await retrievers.for_owner(case.asked_by).ainvoke(case.question)
-    answer = await answer_question(case.question, passages, chain, today=today())
+    # LangChain's usage callback: every chat model call inside the block
+    # reports its tokens here, per model - so the answering model's cost is
+    # read apart from the check model's.
+    with get_usage_metadata_callback() as usage:
+        passages, subjects = await asyncio.gather(
+            retrievers.for_owner(case.asked_by).ainvoke(case.question),
+            check.subjects_of(case.question) if check else asyncio.sleep(0, result=[]),
+        )
+        unnamed = await check.unnamed(subjects, passages) if check and passages else []
+        answer = await _patiently(
+            lambda: answer_question(
+                case.question, passages, chain, today=EVAL_TODAY, unnamed=unnamed
+            )
+        )
     return Outcome(
         case=case,
         answer=answer,
         passages=len(passages),
         seconds=time.monotonic() - started,
         failures=judge(case, answer),
+        input_tokens=(
+            usage.usage_metadata[model]["input_tokens"] if model in usage.usage_metadata else 0
+        ),
     )
 
 
@@ -169,8 +228,8 @@ def report(outcomes: list[Outcome]) -> int:
     for outcome in outcomes:
         mark = f"{GREEN}PASS{RESET}" if outcome.passed else f"{RED}FAIL{RESET}"
         print(
-            f"{mark}  {outcome.case.name:<28} {outcome.seconds:5.2f}s  "
-            f"{outcome.passages} passage(s)"
+            f"{mark}  {outcome.case.name:<36} {outcome.seconds:5.2f}s  "
+            f"{outcome.passages} passage(s)  {outcome.input_tokens:>5} tokens in"
         )
         print(f"{GREY}      Q: {outcome.case.question}{RESET}")
         body = outcome.answer.text or "(refus)"
@@ -180,6 +239,8 @@ def report(outcomes: list[Outcome]) -> int:
                 f"[{c.number}] {c.filename} p.{c.page_number}" for c in outcome.answer.citations
             )
             print(f"{GREY}      S: {sources}{RESET}")
+        if outcome.answer.not_in_documents:
+            print(f"{GREY}      N: not in documents: {outcome.answer.not_in_documents}{RESET}")
         for failure in outcome.failures:
             colour = RED if failure.startswith("LEAKED") else YELLOW
             print(f"      {colour}-> {failure}{RESET}")
@@ -187,7 +248,13 @@ def report(outcomes: list[Outcome]) -> int:
 
     passed = sum(1 for outcome in outcomes if outcome.passed)
     leaks = sum(1 for o in outcomes for f in o.failures if f.startswith("LEAKED"))
+    answered = [o.input_tokens for o in outcomes if o.input_tokens]
     print("=" * 78)
+    if answered:
+        print(
+            f"input tokens per answered question: mean {sum(answered) // len(answered)}, "
+            f"max {max(answered)}"
+        )
     print(f"{passed}/{len(outcomes)} passed", end="")
     if leaks:
         # Never reported as one failure among others: a leak is a different
@@ -197,7 +264,7 @@ def report(outcomes: list[Outcome]) -> int:
     return 0 if passed == len(outcomes) else 1
 
 
-async def main() -> int:
+async def main(names: list[str]) -> int:
     settings = get_settings()
     if not settings.generation_enabled:
         print(f"{RED}KP_GROQ_API_KEY is not set: nothing to evaluate.{RESET}")
@@ -206,7 +273,9 @@ async def main() -> int:
     print(
         f"model={settings.groq_model}  embeddings={settings.embedding_model}  "
         f"max_distance={settings.max_distance}  top_k={settings.top_k}  "
-        f"keywords={settings.keyword_search_enabled}  coverage={settings.min_keyword_coverage}"
+        f"keywords={settings.keyword_search_enabled}  coverage={settings.min_keyword_coverage}  "
+        f"context={settings.passage_context_enabled}  check={settings.groq_check_model or 'off'}  "
+        f"today={EVAL_TODAY}"
     )
     print(f"{GREY}loading the embedding model...{RESET}")
     embeddings = vector_store.load_checked_embeddings(
@@ -222,6 +291,20 @@ async def main() -> int:
         chain = build_answer_chain(
             ANSWER_PROMPT, create_chat_model(settings.groq_api_key, settings.groq_model, client)
         )
+        check = (
+            SubjectCheck(
+                build_advisory_chain(
+                    SUBJECT_PROMPT,
+                    create_chat_model(
+                        settings.groq_api_key, settings.groq_check_model, client, max_tokens=300
+                    ),
+                    Subjects,
+                ),
+                engine,
+            )
+            if settings.groq_check_model
+            else None
+        )
         try:
             await cleanup(factory, storage)  # in case a previous run was interrupted
             await ingest_fixtures(factory, vectors, embeddings, settings, storage)
@@ -229,10 +312,16 @@ async def main() -> int:
                 vectors,
                 k=settings.top_k,
                 max_distance=settings.max_distance,
-                engine=engine if settings.keyword_search_enabled else None,
+                engine=engine,
+                keyword_search=settings.keyword_search_enabled,
                 min_keyword_coverage=settings.min_keyword_coverage,
+                context_window=settings.passage_context_enabled,
             )
-            outcomes = [await run_case(case, retrievers, chain) for case in CASES]
+            outcomes = [
+                await run_case(case, retrievers, chain, check, settings.groq_model)
+                for case in CASES
+                if not names or case.name in names
+            ]
             code = report(outcomes)
         finally:
             await cleanup(factory, storage)
@@ -242,4 +331,4 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(asyncio.run(main(sys.argv[1:])))

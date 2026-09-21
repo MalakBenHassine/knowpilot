@@ -11,6 +11,7 @@ answer and never a disagreement about what the text meant.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 ALICE = "eval-alice"
 BOB = "eval-bob"
@@ -20,6 +21,14 @@ SECURITY = "politique-securite.txt"
 MISCELLANEOUS = "informations-diverses.txt"
 PAYROLL = "salaires-bob.txt"
 VEHICLE = "assurance-auto.txt"
+VEHICLE_GUARANTEES = "assurance-auto-garanties.txt"
+VEHICLE_AMENDMENT = "assurance-auto-avenant.txt"
+
+# The day the evaluation pretends it is. Pinned, because two cases depend on
+# it: an amendment applies "from 1 October 2026", and the right answer changes
+# on that day. An evaluation that passes in September and fails in October
+# without a line of code changing measures the calendar, not the system.
+EVAL_TODAY = date(2026, 9, 21)
 
 
 @dataclass(frozen=True)
@@ -131,6 +140,60 @@ FIXTURES: tuple[Fixture, ...] = (
         ),
     ),
     Fixture(
+        owner_id=ALICE,
+        filename=VEHICLE_GUARANTEES,
+        # Page 2 of the same PDF, exactly as extracted: a table flattened into
+        # one cell per line. "Bris de glace" is the only glass guarantee, and
+        # neither the windscreen nor the wing mirror is named anywhere.
+        text=(
+            "Article 4 — Garanties et franchises\n"
+            "Les garanties souscrites, leurs plafonds et les franchises restant à la charge "
+            "de l'assuré par sinistre sont\nles suivants :\nGarantie\nPlafond\nFranchise\n"
+            "Responsabilité civile\nIllimité (corporel) / 100 M€ (matériel)\nAucune\n"
+            "Bris de glace\nValeur de remplacement\n0 € si réparation / 90 € si remplacement\n"
+            "Vol et tentative de vol\nValeur à dire d'expert\n350 €\n"
+            "Incendie et forces de la nature\nValeur à dire d'expert\n250 €\n"
+            "Dommages tous accidents\nValeur à dire d'expert\n450 €\n"
+            "Assistance 0 km\nRemorquage jusqu'à 150 km\nAucune\n"
+            "Protection juridique\n15 000 € par litige\nSeuil d'intervention 300 €\n"
+            "Le véhicule de remplacement est fourni pendant 7 jours maximum en cas de panne "
+            "ou d'accident, et\npendant 30 jours maximum en cas de vol, dans la limite d'une "
+            "voiture de catégorie B.\n"
+            "Article 5 — Cotisation\n"
+            "La cotisation annuelle est fixée à 684 euros TTC. L'assuré a choisi le paiement "
+            "mensuel par prélèvement :\n12 mensualités de 57 euros, prélevées le 5 de chaque "
+            "mois. En cas de défaut de paiement, une mise en\ndemeure est adressée ; les "
+            "garanties sont suspendues 30 jours après cette mise en demeure si la\ncotisation "
+            "reste impayée.\n"
+            "Le coefficient de réduction-majoration (bonus-malus) de l'assuré est de 0,68 à la "
+            "date d'effet du contrat,\nsoit un bonus de 32 %."
+        ),
+    ),
+    Fixture(
+        owner_id=ALICE,
+        filename=VEHICLE_AMENDMENT,
+        # Page 4, exactly as extracted. The splitter cuts it after "portée à 59
+        # euros.", so the next chunk STARTS with the new premium while its date
+        # of application stays in the chunk before - the defect of ADR-0017.
+        text=(
+            "Avenant numéro 2 et contacts\n"
+            "Avenant numéro 2, signé le 15 septembre 2026, applicable à compter du 1er "
+            "octobre 2026. La franchise\nde la garantie vol et tentative de vol prévue à "
+            "l'article 4 est portée de 350 euros à 500 euros. En\ncontrepartie, une garantie "
+            "« Équipements et accessoires » est ajoutée, couvrant le câble de recharge, le\n"
+            "siège enfant et le système audio à hauteur de 1 500 euros par sinistre, sans "
+            "franchise. La cotisation\nmensuelle est portée à 59 euros. Toutes les autres "
+            "clauses demeurent inchangées.\n"
+            "Contacts utiles\n"
+            "Votre conseillère est Madame Nadia Benali, Agence Lyon Part-Dieu, 42 boulevard "
+            "Vivier-Merle, 69003\nLyon, joignable au 04 78 62 91 30 du lundi au vendredi de "
+            "9 heures à 18 heures. Pour une réclamation,\nécrivez au service qualité : "
+            "reclamations@horizon-mutuelle.fr ; une réponse vous est apportée sous 10\njours "
+            "ouvrés. En cas de désaccord persistant, vous pouvez saisir gratuitement le "
+            "Médiateur de\nl'assurance."
+        ),
+    ),
+    Fixture(
         owner_id=BOB,
         filename=PAYROLL,
         text=(
@@ -153,12 +216,20 @@ class Case:
     # The single most important expectation. Everything else is detail: a
     # system that answers when it should refuse is not a slightly worse
     # assistant, it is a different product.
-    expect_grounded: bool
+    #
+    # None means both are correct - an honest refusal, or an answer that says
+    # what it rests on (see `expect_not_in_documents`). Used only where the
+    # document genuinely does not settle the question.
+    expect_grounded: bool | None
     # Checked case-insensitively against the answer.
     must_contain: tuple[str, ...] = ()
     must_not_contain: tuple[str, ...] = ()
     # The filename the answer must be able to point at.
     must_cite: str | None = None
+    # What the question asks about and no passage names (ADR-0018): an answer
+    # must come with these notices. Every other answer must come with none - a
+    # false "your documents do not mention X" is a failure too.
+    expect_not_in_documents: tuple[str, ...] = ()
     why: str = ""
 
 
@@ -274,17 +345,80 @@ CASES: tuple[Case, ...] = (
     ),
     # --- It refuses what it cannot ----------------------------------------
     Case(
-        name="unanswerable-by-generalisation",
+        name="never-an-unqualified-generalisation",
         asked_by=ALICE,
         question="Quelle doit etre la longueur du code PIN de mon telephone ?",
-        expect_grounded=False,
-        must_not_contain=("douze",),
+        expect_grounded=None,
+        expect_not_in_documents=("code PIN",),
         why=(
             "The security policy sets rules for PASSWORDS. A model that decides a "
             "phone PIN is a kind of password answers twelve characters, with a "
             "valid citation - found by a manual test, where a broken wing mirror "
-            "was given the windscreen deductible. Citation-checking cannot catch "
-            "it: the citation is real, the claim is not in the document."
+            "was given the glass-breakage deductible. Citation-checking cannot "
+            "catch it: the citation is real, the claim is not in the document.\n\n"
+            "The case used to demand a refusal, and four prompt variants failed to "
+            "make it hold (ADR-0018). It now demands what can be guaranteed: "
+            "either a refusal, or an answer that comes with 'your documents do "
+            "not mention code PIN' - a fact checked by the database, not a "
+            "judgement left to the model."
+        ),
+    ),
+    Case(
+        name="qualified-by-a-broader-category",
+        asked_by=ALICE,
+        question="Quelle est la franchise pour un rétroviseur cassé",
+        expect_grounded=None,
+        must_contain=("90",),
+        expect_not_in_documents=("rétroviseur",),
+        why=(
+            "The manual test itself. The contract lists glass breakage, never "
+            "mirrors, and the model answered the glass deductible as if the "
+            "mirror were named. It may be right - the document does not say - "
+            "so a refusal is acceptable, and so is the answer, provided the user "
+            "is told it rests on a category rather than a name."
+        ),
+    ),
+    Case(
+        name="qualified-with-a-question-mark",
+        asked_by=ALICE,
+        question="Quelle est la franchise pour un rétroviseur cassé ?",
+        expect_grounded=None,
+        must_contain=("90",),
+        expect_not_in_documents=("rétroviseur",),
+        why=(
+            "The same question with a trailing '?', which flipped the model's "
+            "decision in every prompt variant measured. The check must not care."
+        ),
+    ),
+    Case(
+        name="an-obvious-category-is-still-flagged",
+        asked_by=ALICE,
+        question="Quelle est la franchise si je dois remplacer mon pare-brise ?",
+        expect_grounded=True,
+        must_contain=("90",),
+        must_cite=VEHICLE_GUARANTEES,
+        expect_not_in_documents=("pare-brise",),
+        why=(
+            "A windscreen IS glass, and answering is right. The notice still "
+            "appears, because it states a fact about words, not a doubt: the "
+            "contract says 'bris de glace' and never 'pare-brise'. Deciding "
+            "which categories are obvious is the judgement that proved unstable."
+        ),
+    ),
+    # --- A value is read with its condition ---------------------------------
+    Case(
+        name="a-value-read-with-its-date",
+        asked_by=ALICE,
+        question="Combien je paie chaque mois",
+        expect_grounded=True,
+        must_contain=("57", "59"),
+        must_cite=VEHICLE_GUARANTEES,
+        why=(
+            "Found by a manual test on 21 September: answered 59 euros, the "
+            "premium of an amendment applicable from 1 October. The chunk said "
+            "'the monthly premium is raised to 59 euros'; its date was in the "
+            "chunk before, which retrieval did not return (ADR-0017). Today the "
+            "answer is 57, then 59 from October - both must be there."
         ),
     ),
     Case(
@@ -398,7 +532,7 @@ CASES: tuple[Case, ...] = (
     ),
 )
 
-EXPECTED_CALLS: int = sum(1 for case in CASES if case.expect_grounded) + 3
+EXPECTED_CALLS: int = sum(1 for case in CASES if case.expect_grounded is not False) + 3
 """Roughly how many questions of the daily budget a full run costs.
 
 Refusals caused by retrieval never reach the provider, so they are free; the
