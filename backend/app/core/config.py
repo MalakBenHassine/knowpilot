@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     # The documentation lists models this account cannot reach, so this value
     # was chosen from the models endpoint queried with the real key.
     groq_model: str = "openai/gpt-oss-120b"
+    # A second, smaller model for one narrow job: naming the thing a question
+    # is about, so the code can check whether any passage names it (ADR-0018).
+    # Groq budgets each model separately, so this call does not spend the
+    # answering model's daily tokens. Empty disables the check; answering
+    # still works, without the "not in your documents" notice.
+    groq_check_model: str = "openai/gpt-oss-20b"
 
     # --- LangSmith tracing (ADR-0014) ---
     # LangChain sends every run - prompt, passages, answer - to LangSmith when
@@ -126,6 +132,13 @@ class Settings(BaseSettings):
     # the keyword leg may add.
     min_keyword_coverage: float = Field(default=0.5, gt=0.0, le=1.0)
 
+    # Each passage is read together with the chunk before it on the same page
+    # (ADR-0017). Contracts state the condition first and the value after -
+    # "amendment applicable from 1 October ... the premium is raised to 59
+    # euros" - and a chunk holding only the value was answered as if it were
+    # already in force. Costs input tokens; off restores bare chunks.
+    passage_context_enabled: bool = True
+
     # --- Daily question budgets (ADR-0012) ---
     # Policy, not logic, which is why it lives here rather than as a constant
     # in the module that enforces it. The same code runs on a laptop with one
@@ -160,7 +173,7 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("groq_api_key", "groq_model", mode="after")
+    @field_validator("groq_api_key", "groq_model", "groq_check_model", mode="after")
     @classmethod
     def _strip(cls, value: str) -> str:
         """Whitespace pasted around a value is invisible and never harmless.

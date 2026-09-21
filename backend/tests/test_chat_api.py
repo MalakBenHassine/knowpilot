@@ -26,6 +26,7 @@ from app.api.deps import (
     get_answer_chain,
     get_quota_tracker,
     get_retrievers,
+    get_subject_check,
     require_csrf,
 )
 from app.core.quota import QuotaTracker
@@ -34,7 +35,14 @@ from app.rag.generation import REFUSAL
 from app.rag.llm import LanguageModelUnavailableError, QuotaExhaustedError
 from app.rag.retrieval import RetrieverFactory
 from app.schemas.chat import SNIPPET_CHARACTERS
-from tests.fakes import FakeVectorStore, SpyChatModel, answer_chain, passage, spy
+from tests.fakes import (
+    FakeSubjectCheck,
+    FakeVectorStore,
+    SpyChatModel,
+    answer_chain,
+    passage,
+    spy,
+)
 from tests.test_documents_api import signed_in_as
 from tests.test_quota import FakeRedis, service_key, user_key
 
@@ -82,8 +90,14 @@ def quota(redis: FakeRedis) -> QuotaTracker:
 
 
 @pytest.fixture
+def check() -> FakeSubjectCheck:
+    # No subject by default: most questions are about a topic, not a thing.
+    return FakeSubjectCheck()
+
+
+@pytest.fixture
 async def client(
-    model: SpyChatModel, store: FakeVectorStore, quota: QuotaTracker
+    model: SpyChatModel, store: FakeVectorStore, quota: QuotaTracker, check: FakeSubjectCheck
 ) -> AsyncIterator[AsyncClient]:
     """The real application with its edges replaced, and nothing else."""
     app.dependency_overrides[current_session] = lambda: signed_in_as(ALICE)
@@ -95,6 +109,7 @@ async def client(
     )
     app.dependency_overrides[get_answer_chain] = lambda: answer_chain(model)
     app.dependency_overrides[get_quota_tracker] = lambda: quota
+    app.dependency_overrides[get_subject_check] = lambda: check
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http:
@@ -167,7 +182,12 @@ async def test_an_empty_library_answers_without_calling_the_model(
     response = await client.post("/api/chat", **ask())
 
     assert response.status_code == 200
-    assert response.json() == {"answer": "", "citations": [], "is_grounded": False}
+    assert response.json() == {
+        "answer": "",
+        "citations": [],
+        "is_grounded": False,
+        "not_in_documents": [],
+    }
     assert model.calls == 0
     assert redis.values == {}
 
@@ -398,7 +418,12 @@ async def test_nothing_found_is_a_single_done_event(
 ) -> None:
     events = events_of((await client.post("/api/chat/stream", **ask())).text)
 
-    assert events == [("done", {"answer": "", "citations": [], "is_grounded": False})]
+    assert events == [
+        (
+            "done",
+            {"answer": "", "citations": [], "is_grounded": False, "not_in_documents": []},
+        )
+    ]
     assert model.calls == 0
     assert redis.values == {}
 
@@ -454,3 +479,96 @@ async def test_the_stream_is_not_open_to_anonymous_requests() -> None:
         response = await http.post("/api/chat/stream", **ask())
 
     assert response.status_code == 401
+
+
+# --- 🔎 What no passage names (ADR-0018) ------------------------------------
+
+MIRROR = "Quelle est la franchise pour un retroviseur casse ?"
+GLASS = "Bris de glace : 0 euro si reparation, 90 euros si remplacement. " * 5
+
+
+async def test_a_thing_no_passage_names_is_reported_with_the_answer(
+    client: AsyncClient, store: FakeVectorStore, model: SpyChatModel, check: FakeSubjectCheck
+) -> None:
+    """The answer stands, and the user is told what it rests on.
+
+    The notice is attached by code: whatever the model wrote, the response
+    says that no passage names the mirror.
+    """
+    store.hits = [(passage(GLASS), 0.3)]
+    check.subjects, check.absent = ["retroviseur"], ["retroviseur"]
+
+    body = (await client.post("/api/chat", **ask(MIRROR))).json()
+
+    assert body["is_grounded"] is True
+    assert body["not_in_documents"] == ["retroviseur"]
+    # And the model was told it, as a fact rather than a rule to apply.
+    _, prompt = model.last()
+    assert 'Not named in any passage: "retroviseur"' in prompt
+
+
+async def test_a_thing_the_passages_name_raises_no_notice(
+    client: AsyncClient, store: FakeVectorStore, model: SpyChatModel, check: FakeSubjectCheck
+) -> None:
+    store.hits = [(passage(CONGES), 0.2)]
+    check.subjects = ["conges"]
+
+    body = (await client.post("/api/chat", **ask())).json()
+
+    assert body["not_in_documents"] == []
+    _, prompt = model.last()
+    assert "Not named in any passage" not in prompt
+
+
+async def test_the_check_is_skipped_when_nothing_was_found(
+    client: AsyncClient, check: FakeSubjectCheck, redis: FakeRedis
+) -> None:
+    """No passage, no model call - and no presence check either."""
+    check.subjects = ["retroviseur"]
+
+    body = (await client.post("/api/chat", **ask(MIRROR))).json()
+
+    assert body["not_in_documents"] == []
+    assert check.checked == []
+    assert redis.values == {}
+
+
+async def test_answering_works_without_the_check(
+    client: AsyncClient, store: FakeVectorStore
+) -> None:
+    """Disabled (no check model configured) is not an outage."""
+    app.dependency_overrides[get_subject_check] = lambda: None
+    store.hits = [(passage(CONGES), 0.2)]
+
+    response = await client.post("/api/chat", **ask())
+
+    assert response.status_code == 200
+    assert response.json()["is_grounded"] is True
+    assert response.json()["not_in_documents"] == []
+
+
+async def test_the_streamed_verdict_carries_the_notice_too(
+    client: AsyncClient, store: FakeVectorStore, check: FakeSubjectCheck
+) -> None:
+    store.hits = [(passage(GLASS), 0.3)]
+    check.subjects, check.absent = ["retroviseur"], ["retroviseur"]
+
+    response = await client.post("/api/chat/stream", **ask(MIRROR))
+    events = events_of(response.text)
+
+    assert events[-1][0] == "done"
+    assert events[-1][1]["not_in_documents"] == ["retroviseur"]
+
+
+async def test_a_refusal_carries_no_notice(
+    client: AsyncClient, store: FakeVectorStore, check: FakeSubjectCheck
+) -> None:
+    """Nothing was answered, so there is nothing to qualify."""
+    app.dependency_overrides[get_answer_chain] = lambda: answer_chain(spy(REFUSAL))
+    store.hits = [(passage(GLASS), 0.3)]
+    check.subjects, check.absent = ["retroviseur"], ["retroviseur"]
+
+    body = (await client.post("/api/chat", **ask(MIRROR))).json()
+
+    assert body["is_grounded"] is False
+    assert body["not_in_documents"] == []

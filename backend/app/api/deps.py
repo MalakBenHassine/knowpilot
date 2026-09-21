@@ -12,6 +12,7 @@ from app.core.quota import QuotaTracker
 from app.core.session import SessionData, SessionStore
 from app.core.storage import FileStorage
 from app.rag.retrieval import RetrieverFactory
+from app.rag.subjects import SubjectCheck
 
 
 def get_session_store(request: Request) -> SessionStore:
@@ -66,6 +67,19 @@ def get_answer_chain(request: Request) -> Runnable[dict[str, Any], str]:
 
 
 AnswerChain = Annotated[Runnable[dict[str, Any], str], Depends(get_answer_chain)]
+
+
+def get_subject_check(request: Request) -> SubjectCheck | None:
+    """The subject check of ADR-0018, or None when it is disabled.
+
+    None is NOT a 503, unlike the two dependencies above: the check only adds
+    a notice to an answer, and its absence must never stop one.
+    """
+    check: SubjectCheck | None = request.app.state.subject_check
+    return check
+
+
+SubjectChecker = Annotated[SubjectCheck | None, Depends(get_subject_check)]
 
 
 def get_quota_tracker(request: Request) -> QuotaTracker:

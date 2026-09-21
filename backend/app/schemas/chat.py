@@ -132,6 +132,12 @@ class ChatResponse(BaseModel):
     # The field the interface actually branches on. Kept explicit rather than
     # inferred from an empty citation list, so the meaning stays in one place.
     is_grounded: bool
+    # Things the question asks about that no cited passage names (ADR-0018):
+    # "rétroviseur" when the contract only speaks of glass breakage. A fact
+    # about words, checked by the database, that the interface shows next to
+    # the answer - so an inference is never mistaken for a quotation. Empty
+    # on almost every answer.
+    not_in_documents: list[str] = []
 
     @classmethod
     def of(cls, answer: Answer) -> "ChatResponse":
@@ -156,4 +162,5 @@ class ChatResponse(BaseModel):
                 for citation in answer.citations
             ],
             is_grounded=answer.is_grounded,
+            not_in_documents=list(answer.not_in_documents),
         )

@@ -98,6 +98,29 @@ def passages(count: int = 2) -> list[Document]:
     ]
 
 
+class FakeSubjectCheck:
+    """Stands in for SubjectCheck: the extraction and the SQL are tested elsewhere.
+
+    `subjects` is what the question is about; `absent` is which of them no
+    passage names. Records what it was asked, so a test can prove the presence
+    check never runs when there is nothing to check.
+    """
+
+    def __init__(self, subjects: Sequence[str] = (), absent: Sequence[str] = ()) -> None:
+        self.subjects = list(subjects)
+        self.absent = list(absent)
+        self.questions: list[str] = []
+        self.checked: list[tuple[list[str], int]] = []
+
+    async def subjects_of(self, question: str) -> list[str]:
+        self.questions.append(question)
+        return list(self.subjects)
+
+    async def unnamed(self, subjects: Sequence[str], passages: Sequence[Document]) -> list[str]:
+        self.checked.append((list(subjects), len(passages)))
+        return [subject for subject in subjects if subject in self.absent]
+
+
 class FakeVectorStore(VectorStore):
     """Returns preset (document, distance) pairs and records every filter.
 

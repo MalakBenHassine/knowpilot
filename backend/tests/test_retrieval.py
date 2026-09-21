@@ -12,13 +12,16 @@ import pytest
 from langchain_core.callbacks import AsyncCallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.rag.retrieval import (
+    ContextWindowRetriever,
     HybridRetriever,
     KeywordRetriever,
     RetrieverFactory,
     SemanticRetriever,
     fuse,
+    join_overlapping,
 )
 from tests.fakes import FakeVectorStore, passage
 
@@ -214,3 +217,56 @@ def test_every_retriever_is_built_for_one_owner() -> None:
 
     assert store.filters == [{"owner_id": {"$eq": "alice"}}, {"owner_id": {"$eq": "bob"}}]
     assert store.k == [5, 5]
+
+
+# --- ContextWindowRetriever (ADR-0017) ---------------------------------------
+
+# Never connected: creating an engine opens nothing. Any query through it would
+# fail, which is what the tests below rely on to prove no query was made.
+UNREACHABLE = create_async_engine("postgresql+asyncpg://nobody:nothing@127.0.0.1:1/none")
+
+
+def test_the_overlap_of_two_chunks_is_read_once() -> None:
+    before = "Avenant applicable au 1er octobre. La cotisation est portée à 59 euros."
+    after = "La cotisation est portée à 59 euros. Les autres clauses demeurent."
+
+    assert join_overlapping(before, after) == (
+        "Avenant applicable au 1er octobre. La cotisation est portée à 59 euros. "
+        "Les autres clauses demeurent."
+    )
+
+
+def test_chunks_without_overlap_are_joined_whole() -> None:
+    assert join_overlapping("Premier.", "Second.") == "Premier.\nSecond."
+
+
+def test_a_coincidental_match_of_a_few_characters_is_not_an_overlap() -> None:
+    # "de " ends one chunk and starts the next: merging would delete text.
+    assert join_overlapping("la franchise de ", "de 350 euros") == "la franchise de \nde 350 euros"
+
+
+def test_the_first_chunk_of_a_page_needs_no_query() -> None:
+    store = FakeVectorStore([(passage("Titre.", distance=0.2), 0.2)])
+    window = ContextWindowRetriever(retriever=semantic(store), engine=UNREACHABLE, owner_id="alice")
+
+    found = anyio.run(window.ainvoke, "question")
+
+    assert [doc.page_content for doc in found] == ["Titre."]
+
+
+def test_the_window_is_the_last_step_of_the_retrieval() -> None:
+    factory = RetrieverFactory(
+        FakeVectorStore(), k=8, max_distance=0.6, engine=UNREACHABLE, context_window=True
+    )
+
+    retriever = factory.for_owner("alice")
+
+    assert isinstance(retriever, ContextWindowRetriever)
+    assert isinstance(retriever.retriever, HybridRetriever)
+    assert retriever.owner_id == "alice"
+
+
+def test_the_window_can_be_turned_off() -> None:
+    factory = RetrieverFactory(FakeVectorStore(), k=8, max_distance=0.6, engine=UNREACHABLE)
+
+    assert isinstance(factory.for_owner("alice"), HybridRetriever)

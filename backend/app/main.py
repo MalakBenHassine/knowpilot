@@ -20,8 +20,9 @@ from app.core.tracing import ensure_tracing_is_deliberate
 from app.db.session import create_engine, create_session_factory
 from app.db.vector_store import create_vector_store, load_checked_embeddings
 from app.rag.generation import ANSWER_PROMPT
-from app.rag.llm import build_answer_chain, create_chat_model
+from app.rag.llm import build_advisory_chain, build_answer_chain, create_chat_model
 from app.rag.retrieval import RetrieverFactory
+from app.rag.subjects import SUBJECT_PROMPT, SubjectCheck, Subjects
 
 settings = get_settings()
 # Before anything else: a module that logs during import would otherwise write
@@ -82,9 +83,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await create_vector_store(engine, embeddings),
             k=settings.top_k,
             max_distance=settings.max_distance,
-            # None turns the keyword leg off: vector-only retrieval.
-            engine=engine if settings.keyword_search_enabled else None,
+            engine=engine,
+            keyword_search=settings.keyword_search_enabled,
             min_keyword_coverage=settings.min_keyword_coverage,
+            context_window=settings.passage_context_enabled,
         )
 
         async def embeddings_ready() -> bool:
@@ -112,6 +114,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # every question. Closed below, in reverse order of construction.
     http_client = httpx.AsyncClient()
     app.state.answer_chain = None
+    app.state.subject_check = None
     if settings.generation_enabled:
         # Built once: an LCEL chain is immutable and safe to share between
         # concurrent requests, so there is nothing to gain from one per call.
@@ -119,6 +122,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ANSWER_PROMPT,
             create_chat_model(settings.groq_api_key, settings.groq_model, http_client),
         )
+
+        if settings.groq_check_model:
+            app.state.subject_check = SubjectCheck(
+                build_advisory_chain(
+                    SUBJECT_PROMPT,
+                    create_chat_model(
+                        settings.groq_api_key,
+                        settings.groq_check_model,
+                        http_client,
+                        # A JSON list of a few names: 300 tokens leave room
+                        # for the model's short reasoning and nothing else.
+                        max_tokens=300,
+                    ),
+                    Subjects,
+                ),
+                engine,
+            )
 
         async def generation_ready() -> bool:
             # Deliberately NOT a call to the provider: a readiness probe runs

@@ -20,21 +20,24 @@ The owner is read from the session and from nowhere else. `ChatRequest` has a
 single field, so there is no other owner in scope to take by mistake.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 from langchain_core.documents import Document
 
-from app.api.deps import AnswerChain, CsrfProtected, Quota, Retrievers
+from app.api.deps import AnswerChain, CsrfProtected, Quota, Retrievers, SubjectChecker
 from app.core.clock import today
 from app.core.quota import QuotaExceededError, QuotaTracker
 from app.rag.generation import Delta, answer_question, stream_answer
 from app.rag.llm import LanguageModelError, QuotaExhaustedError
 from app.rag.retrieval import RetrieverFactory
+from app.rag.subjects import SubjectCheck
 from app.schemas.chat import ChatRequest, ChatResponse
 
 logger = logging.getLogger(__name__)
@@ -44,18 +47,41 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 UNGROUNDED_RESPONSE = ChatResponse(answer="", citations=[], is_grounded=False)
 
 
+@dataclass(frozen=True)
+class Evidence:
+    """What the model will be given: the passages, and what none of them names."""
+
+    passages: Sequence[Document]
+    unnamed: Sequence[str] = ()
+
+
+async def _no_subjects() -> list[str]:
+    return []
+
+
 async def _prepare(
-    question: str, owner_id: str, retrievers: RetrieverFactory, quota: QuotaTracker
-) -> Sequence[Document]:
-    """Steps 1 to 4, shared by both routes. Empty means: answer "not found"."""
+    question: str,
+    owner_id: str,
+    retrievers: RetrieverFactory,
+    quota: QuotaTracker,
+    check: SubjectCheck | None,
+) -> Evidence:
+    """Steps 1 to 4, shared by both routes. No passage means: answer "not found"."""
     # 1. Retrieve BEFORE reserving the budget. The hybrid retriever embeds the
     #    question with the very model that indexed the chunks - in a thread, so
     #    the event loop keeps serving everyone else - while PostgreSQL runs the
     #    keyword search, and both search this owner's passages only. It is built
     #    per request because the owner is part of it: there is no shared
     #    retriever that could serve the wrong tenant.
+    #
+    #    Meanwhile the check model names what the question is about (ADR-0018).
+    #    It needs the question only, so it runs concurrently and costs no
+    #    latency; it fails open, so it cannot fail this step.
     try:
-        passages = await retrievers.for_owner(owner_id).ainvoke(question)
+        passages, subjects = await asyncio.gather(
+            retrievers.for_owner(owner_id).ainvoke(question),
+            check.subjects_of(question) if check else _no_subjects(),
+        )
     except Exception:
         # The model or the database failed. The traceback goes to the logs;
         # the user learns only that answering is unavailable right now.
@@ -69,7 +95,7 @@ async def _prepare(
     #    strongest guard of the feature is that the model is never called.
     #    Nothing was sent to the provider, so nothing is charged.
     if not passages:
-        return passages
+        return Evidence(passages)
 
     # 3. Reserve now, because the next step spends tokens that cannot be
     #    reclaimed. Incrementing after a successful answer would let two
@@ -88,7 +114,11 @@ async def _prepare(
             # immediate retry, which is refused again.
             headers={"Retry-After": str(exc.retry_after)},
         ) from exc
-    return passages
+
+    # 4. Which subjects of the question no passage names: one SQL query on
+    #    the passages just retrieved.
+    unnamed = await check.unnamed(subjects, passages) if check else []
+    return Evidence(passages, unnamed)
 
 
 @router.post("", summary="Ask a question about your own documents")
@@ -101,20 +131,27 @@ async def ask(
     retrievers: Retrievers,
     chain: AnswerChain,
     quota: Quota,
+    check: SubjectChecker,
 ) -> ChatResponse:
     # The owner: `sub` is the Keycloak subject, stable even when the user
     # changes their email, and the only identity we trust, because it came out
     # of a cookie we signed ourselves.
     owner_id = session.sub
-    passages = await _prepare(payload.question, owner_id, retrievers, quota)
-    if not passages:
+    evidence = await _prepare(payload.question, owner_id, retrievers, quota, check)
+    if not evidence.passages:
         return UNGROUNDED_RESPONSE
 
-    # 4. Generate. Every provider failure arrives as one of our own exception
+    # 5. Generate. Every provider failure arrives as one of our own exception
     #    types (llm.GuardedChain), so this handler never has to know that Groq
     #    exists.
     try:
-        answer = await answer_question(payload.question, passages, chain, today=today())
+        answer = await answer_question(
+            payload.question,
+            evidence.passages,
+            chain,
+            today=today(),
+            unnamed=evidence.unnamed,
+        )
     except QuotaExhaustedError as exc:
         # Their budget, not ours: our counter was wrong about the real one, so
         # the user keeps the question they could not use.
@@ -132,7 +169,7 @@ async def ask(
             status.HTTP_503_SERVICE_UNAVAILABLE, "Answering is unavailable"
         ) from exc
 
-    # 5. A refusal still costs a call, so it is not refunded: the tokens were
+    # 6. A refusal still costs a call, so it is not refunded: the tokens were
     #    spent, and the honest answer is the product working, not failing.
     return ChatResponse.of(answer)
 
@@ -154,6 +191,7 @@ async def ask_streaming(
     retrievers: Retrievers,
     chain: AnswerChain,
     quota: Quota,
+    check: SubjectChecker,
 ) -> StreamingResponse:
     """The same answer as POST /api/chat, delivered as Server-Sent Events.
 
@@ -170,17 +208,23 @@ async def ask_streaming(
         error   {"kind", "retry_after"?}  instead of `done`, on a failure
     """
     owner_id = session.sub
-    passages = await _prepare(payload.question, owner_id, retrievers, quota)
+    evidence = await _prepare(payload.question, owner_id, retrievers, quota, check)
 
     async def events() -> AsyncIterator[str]:
-        if not passages:
+        if not evidence.passages:
             yield _event("done", UNGROUNDED_RESPONSE.model_dump(mode="json"))
             return
         # A real stage, reported by the server - the interface used to guess
         # it with a timer.
         yield _event("stage", {"stage": "generating"})
         try:
-            async for event in stream_answer(payload.question, passages, chain, today=today()):
+            async for event in stream_answer(
+                payload.question,
+                evidence.passages,
+                chain,
+                today=today(),
+                unnamed=evidence.unnamed,
+            ):
                 if isinstance(event, Delta):
                     yield _event("token", {"text": event.text})
                 else:

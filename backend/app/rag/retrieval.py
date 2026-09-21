@@ -1,10 +1,11 @@
 """Retrieval: LangChain retrievers that cannot be built without an owner.
 
-Three `BaseRetriever`s, composed:
+Four `BaseRetriever`s, composed:
 
-    SemanticRetriever   meaning      pgvector cosine distance, via PGVectorStore
-    KeywordRetriever    exact words  PostgreSQL full-text search, via SQL
-    HybridRetriever     both         reciprocal rank fusion of the two
+    SemanticRetriever       meaning      pgvector cosine distance, via PGVectorStore
+    KeywordRetriever        exact words  PostgreSQL full-text search, via SQL
+    HybridRetriever         both         reciprocal rank fusion of the two
+    ContextWindowRetriever  context      each passage read with the chunk before it
 
 Each is a standard LangChain retriever - `ainvoke` works, callbacks trace it,
 it composes in LCEL - and each takes `owner_id` as a REQUIRED field. Pydantic
@@ -27,6 +28,7 @@ Why not the ready-made hybrid options (ADR-0015, both measured):
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Sequence
 
 from langchain_core.callbacks import (
@@ -278,12 +280,138 @@ def fuse(semantic: Sequence[Document], lexical: Sequence[Document], *, k: int) -
     return [merged[key] for key in ranked]
 
 
+# The chunk BEFORE each passage, same document, same page, same owner. The
+# owner is filtered on again although the passages already belong to them:
+# a query that reads chunks by identifier must not depend on its caller for
+# tenancy. The page is part of the join so a citation never points at page 4
+# for text that came from page 3.
+_PREVIOUS_CHUNKS = text(
+    """
+    SELECT chunk.document_id, chunk.chunk_index, chunk.text
+    FROM document_chunks AS chunk
+    JOIN unnest(
+        CAST(:documents AS uuid[]), CAST(:indexes AS integer[]), CAST(:pages AS integer[])
+    ) AS wanted(document_id, chunk_index, page_number)
+      ON chunk.document_id = wanted.document_id
+     AND chunk.chunk_index = wanted.chunk_index
+     AND chunk.page_number = wanted.page_number
+    WHERE chunk.owner_id = :owner_id
+    """
+)
+
+# Below this, a match between the end of one chunk and the start of the next
+# is a coincidence - a shared "e" or "de " - not the splitter's overlap, and
+# merging on it would delete real characters.
+MIN_OVERLAP_CHARACTERS = 10
+
+
+def join_overlapping(before: str, after: str) -> str:
+    """Join two consecutive chunks without repeating their overlap.
+
+    The splitter repeats up to CHUNK_OVERLAP characters of one chunk at the
+    start of the next. Concatenated as they are, the model would read that
+    sentence twice - and a sentence read twice looks like two statements.
+    """
+    for size in range(min(len(before), len(after)), MIN_OVERLAP_CHARACTERS - 1, -1):
+        if before.endswith(after[:size]):
+            return before + after[size:]
+    return f"{before}\n{after}"
+
+
+class ContextWindowRetriever(_AsyncOnly):
+    """Each passage, read together with the chunk before it on the same page.
+
+    The defect this fixes, found by a manual test: "how much do I pay each
+    month?" was answered 59 euros, the amount of an amendment applicable from
+    the first of NEXT month. The chunk sent to the model began with "the
+    monthly premium is raised to 59 euros"; the date of application was two
+    sentences earlier, in the previous chunk, which retrieval did not return.
+    Contracts, leases and policies all write the condition first and the value
+    after, so a chunk boundary between them is common, not bad luck.
+
+    The standard remedy (LangChain's ParentDocumentRetriever, LlamaIndex's
+    sentence window) is to SEARCH on small chunks and READ larger text around
+    them: small chunks keep the vectors precise, the surrounding text keeps
+    the meaning. Here the window is the previous chunk, fetched in one query
+    for all passages. A passage whose previous chunk was retrieved anyway is
+    left alone: the model already reads it, as its own passage.
+
+    The price is input tokens - up to twice the passage text - measured by the
+    evaluation harness before being accepted.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    retriever: BaseRetriever
+    engine: AsyncEngine
+    owner_id: str = Field(min_length=1)
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        passages = await self.retriever.ainvoke(
+            query, config={"callbacks": run_manager.get_child()}
+        )
+        return await self._widen(passages)
+
+    async def _widen(self, passages: list[Document]) -> list[Document]:
+        present = {_position(passage) for passage in passages}
+        wanted = [
+            passage
+            for passage in passages
+            if (position := _position(passage))[1] > 0
+            and (position[0], position[1] - 1) not in present
+        ]
+        if not wanted:
+            return passages
+
+        async with self.engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    _PREVIOUS_CHUNKS,
+                    {
+                        "documents": [uuid.UUID(_position(p)[0]) for p in wanted],
+                        "indexes": [_position(p)[1] - 1 for p in wanted],
+                        "pages": [int(p.metadata["page_number"]) for p in wanted],
+                        "owner_id": self.owner_id,
+                    },
+                )
+            ).all()
+        previous = {(str(row.document_id), row.chunk_index): row.text for row in rows}
+
+        widened = []
+        for passage in passages:
+            document_id, index = _position(passage)
+            before = previous.get((document_id, index - 1))
+            if before is None:
+                widened.append(passage)
+                continue
+            widened.append(
+                Document(
+                    page_content=join_overlapping(before, passage.page_content),
+                    id=passage.id,
+                    # The metadata of the passage that was FOUND: its page is
+                    # the one cited, and `context_from` says the text now also
+                    # holds the chunk before it.
+                    metadata={**passage.metadata, "context_from": index - 1},
+                )
+            )
+        return widened
+
+
+def _position(passage: Document) -> tuple[str, int]:
+    return str(passage.metadata["document_id"]), int(passage.metadata["chunk_index"])
+
+
 class RetrieverFactory:
     """Builds the retriever for one owner, per request.
 
     Built once at startup with the shared store, engine and policy; called per
     request with the owner from the session. The owner is part of the object,
     so there is no shared retriever that could serve the wrong tenant.
+
+    Without an engine the retriever is vector-only and reads bare chunks:
+    both other steps are SQL.
     """
 
     def __init__(
@@ -294,12 +422,16 @@ class RetrieverFactory:
         max_distance: float,
         engine: AsyncEngine | None = None,
         min_keyword_coverage: float = 0.5,
+        keyword_search: bool = True,
+        context_window: bool = False,
     ) -> None:
         self._store = vector_store
         self._engine = engine
         self._k = k
         self._max_distance = max_distance
         self._min_keyword_coverage = min_keyword_coverage
+        self._keyword_search = keyword_search
+        self._context_window = context_window
 
     def for_owner(self, owner_id: str) -> BaseRetriever:
         semantic = SemanticRetriever(
@@ -309,12 +441,21 @@ class RetrieverFactory:
             max_distance=self._max_distance,
         )
         if self._engine is None:
-            # Keyword search disabled: vector-only, exactly the behaviour
-            # before ADR-0015 - which is how the gain was measured.
+            # Vector-only, exactly the behaviour before ADR-0015 - which is
+            # how the gain of each later step was measured.
             return semantic
-        return HybridRetriever(
-            semantic=semantic,
-            keyword=KeywordRetriever(engine=self._engine, owner_id=owner_id, k=self._k),
-            k=self._k,
-            min_keyword_coverage=self._min_keyword_coverage,
-        )
+        retriever: BaseRetriever = semantic
+        if self._keyword_search:
+            retriever = HybridRetriever(
+                semantic=semantic,
+                keyword=KeywordRetriever(engine=self._engine, owner_id=owner_id, k=self._k),
+                k=self._k,
+                min_keyword_coverage=self._min_keyword_coverage,
+            )
+        if self._context_window:
+            # Last: the window widens what was SELECTED, it never takes part
+            # in selecting. Admission rules and ranking are unchanged.
+            retriever = ContextWindowRetriever(
+                retriever=retriever, engine=self._engine, owner_id=owner_id
+            )
+        return retriever

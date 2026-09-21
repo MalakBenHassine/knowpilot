@@ -29,6 +29,7 @@ INPUTS = {
     "passages": "[1] (document A) Docker est utilise.",
     "question": "Quels outils ?",
     "today": "2026-09-21",
+    "unnamed": "",
 }
 
 Handler = Callable[[httpx.Request], httpx.Response]

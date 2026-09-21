@@ -269,7 +269,7 @@ def test_a_hostile_instruction_stays_inside_the_data_block() -> None:
 def test_the_template_declares_exactly_the_expected_variables() -> None:
     # A typo in a placeholder would otherwise surface as a KeyError on the
     # first real question, in production.
-    assert set(ANSWER_PROMPT.input_variables) == {"passages", "question", "today"}
+    assert set(ANSWER_PROMPT.input_variables) == {"passages", "question", "today", "unnamed"}
 
 
 def test_passages_are_numbered_from_one() -> None:
@@ -449,15 +449,138 @@ def test_the_letter_reveals_nothing_about_the_file() -> None:
     assert "12" not in human.replace("2026-09-21", "")
 
 
-def test_the_model_is_forbidden_to_generalise() -> None:
+def test_the_model_is_forbidden_to_pass_a_category_off_as_a_name() -> None:
     """Found by a manual test: asked about a broken wing mirror, the model
-    applied the windscreen deductible - "a mirror is glass" - which no passage
-    says. The citation was valid; the claim was not in the document."""
+    applied the glass-breakage deductible - "a mirror is glass" - which no
+    passage says. The citation was valid; the claim was not in the document."""
     system, _ = SpyChatModel.last(_asked(spy()))
 
-    assert "Never extend a rule to a case the passages do not name" in system
+    assert "Never present a rule as naming something it does not name" in system
+
+
+# --- What no passage names (ADR-0018) ------------------------------------------
+
+
+def ask_unnamed(model: SpyChatModel, unnamed: list[str]) -> Answer:
+    return anyio.run(
+        lambda: answer_question(
+            QUESTION, passages(1), answer_chain(model), today=TODAY, unnamed=unnamed
+        )
+    )
+
+
+def test_the_model_is_handed_what_no_passage_names() -> None:
+    """A fact it is given, not a judgement it must make: the judgement was
+    measured flipping on a trailing question mark."""
+    model = spy()
+
+    ask_unnamed(model, ["rétroviseur", "code PIN"])
+
+    _, human = model.last()
+    assert 'Not named in any passage: "rétroviseur", "code PIN"\n' in human
+
+
+def test_the_prompt_is_unchanged_when_everything_is_named() -> None:
+    # The common case must cost nothing: not a token, not a changed prompt.
+    model = spy()
+
+    ask_unnamed(model, [])
+
+    _, human = model.last()
+    assert human.startswith("Today's date: 2026-09-21\n\n<passages>\n")
+    assert "Not named" not in human
+
+
+def test_the_answer_carries_what_no_passage_names() -> None:
+    answer = ask_unnamed(spy("Bris de glace : 90 euros [1]."), ["rétroviseur"])
+
+    assert answer.is_grounded is True
+    assert answer.not_in_documents == ("rétroviseur",)
+
+
+def test_a_refusal_carries_nothing_to_qualify() -> None:
+    answer = ask_unnamed(spy(REFUSAL), ["rétroviseur"])
+
+    assert answer.is_grounded is False
+    assert answer.not_in_documents == ()
+
+
+def test_the_streamed_verdict_carries_it_too() -> None:
+    model = spy("Bris de glace : 90 euros [1].")
+
+    async def collect() -> list[Delta | Final]:
+        return [
+            event
+            async for event in stream_answer(
+                QUESTION, passages(1), answer_chain(model), today=TODAY, unnamed=["rétroviseur"]
+            )
+        ]
+
+    assert final(anyio.run(collect)).not_in_documents == ("rétroviseur",)
 
 
 def _asked(model: SpyChatModel) -> SpyChatModel:
     ask(model, passages(1))
     return model
+
+
+# --- Document letters never reach the user -----------------------------------
+
+
+def test_a_document_letter_written_by_the_model_is_removed() -> None:
+    """Found by a manual test: "Assurance (document A) : 59 euros [1]"."""
+    answer = ask(
+        spy("Assurance (document A) : 59 euros [1]. Bail (document B) : 1025 euros [2]."),
+        passages(2),
+    )
+
+    assert "document A" not in answer.text
+    assert "document B" not in answer.text
+    assert answer.text == "Assurance : 59 euros [1]. Bail : 1025 euros [2]."
+
+
+def test_a_streamed_letter_never_flashes_on_screen() -> None:
+    # One character at a time: "(d", "(do", ... "(document A)" would appear
+    # and vanish if it were released as it grows.
+    events = stream("Docker [1] (document A) est utilise. Jenkins aussi [2].")
+
+    assert "(doc" not in shown(events)
+    assert shown(events) == final(events).text
+
+
+def test_an_ordinary_parenthesis_is_not_held_back() -> None:
+    events = stream("Docker [1] (version 24) est utilise.")
+
+    assert "(version 24)" in shown(events)
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        # The exact bytes the model wrote, found by the evaluation: French
+        # typography puts a narrow no-break space before the letter.
+        ("Assurance (document A) : 57 € [1].", "Assurance : 57 € [1]."),
+        ("Assurance (document A) : 57 € [1].", "Assurance : 57 € [1]."),
+        ("**Assurance (document A)** : 57 € [1].", "**Assurance** : 57 € [1]."),
+        (
+            "Les deux contrats (documents A et B) prévoient 57 € [1].",
+            "Les deux contrats prévoient 57 € [1].",
+        ),
+        ("Selon ( document B ), 57 € [1].", "Selon, 57 € [1]."),
+    ],
+)
+def test_every_spelling_of_a_letter_is_removed(reply: str, expected: str) -> None:
+    assert ask(spy(reply), passages(1)).text == expected
+
+
+def test_a_letter_with_a_narrow_space_never_flashes_while_streaming() -> None:
+    events = stream("Docker [1] (document A) est utilise. Jenkins aussi [2].")
+
+    assert "(doc" not in shown(events)
+    assert shown(events) == final(events).text
+
+
+def test_a_parenthesis_that_is_not_a_label_is_released_once_it_closes() -> None:
+    events = stream("Docker [1] (documentation interne) est utilise.")
+
+    assert "(documentation interne)" in shown(events)

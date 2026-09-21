@@ -32,7 +32,7 @@ from app.db.vector_store import (
     delete_document,
     replace_document_chunks,
 )
-from app.rag.retrieval import KeywordRetriever, SemanticRetriever
+from app.rag.retrieval import ContextWindowRetriever, KeywordRetriever, SemanticRetriever
 from tests.conftest import requires_database
 
 MODEL = "BAAI/bge-m3"
@@ -83,10 +83,21 @@ class Db:
             return row.id
 
     async def index(
-        self, owner_id: str, document_id: uuid.UUID, texts_and_axes: list[tuple[str, int]]
+        self,
+        owner_id: str,
+        document_id: uuid.UUID,
+        texts_and_axes: list[tuple[str, int]],
+        pages: list[int] | None = None,
     ) -> int:
+        """One chunk per page unless `pages` says otherwise."""
         chunks = [
-            Document(text, metadata={"chunk_index": index, "page_number": index + 1})
+            Document(
+                text,
+                metadata={
+                    "chunk_index": index,
+                    "page_number": pages[index] if pages else index + 1,
+                },
+            )
             for index, (text, _) in enumerate(texts_and_axes)
         ]
         return await replace_document_chunks(
@@ -310,3 +321,72 @@ async def test_sql_in_the_question_is_just_words(db: Db) -> None:
 
     assert found == []
     assert await db.count(document_id) == 1
+
+
+# --- The context window, on real chunks (ADR-0017) -----------------------------
+
+AMENDMENT = (
+    "Avenant signé le 15 septembre, applicable au 1er octobre. La cotisation passe à 59 euros."
+)
+VALUE = "La cotisation passe à 59 euros. Les autres clauses demeurent inchangées."
+
+
+def window(db: Db, owner_id: str) -> ContextWindowRetriever:
+    return ContextWindowRetriever(
+        retriever=db.retriever(owner_id), engine=db.engine, owner_id=owner_id
+    )
+
+
+async def test_a_passage_is_read_with_the_chunk_before_it(db: Db) -> None:
+    """The defect of ADR-0017: the value was found, its date was not."""
+    document_id = await db.document(db.alice)
+    # Only the second chunk is close to the question (axis 0).
+    await db.index(db.alice, document_id, [(AMENDMENT, 1), (VALUE, 0)], pages=[4, 4])
+
+    found = await window(db, db.alice).ainvoke("combien je paie")
+
+    assert len(found) == 1
+    text = found[0].page_content
+    assert "applicable au 1er octobre" in text
+    # The overlap of the splitter is read once, not twice.
+    assert text.count("59 euros") == 1
+    # Still the passage that was found: its page and its position are cited.
+    assert found[0].metadata["chunk_index"] == 1
+    assert found[0].metadata["page_number"] == 4
+    assert found[0].metadata["context_from"] == 0
+
+
+async def test_the_window_never_crosses_a_page(db: Db) -> None:
+    """A citation says page 4; text from page 3 would make it lie."""
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [(AMENDMENT, 1), (VALUE, 0)], pages=[3, 4])
+
+    found = await window(db, db.alice).ainvoke("combien je paie")
+
+    assert found[0].page_content == VALUE
+    assert "context_from" not in found[0].metadata
+
+
+async def test_a_chunk_already_retrieved_is_not_read_twice(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [(AMENDMENT, 0), (VALUE, 0)], pages=[4, 4])
+
+    found = await window(db, db.alice).ainvoke("combien je paie")
+
+    assert sorted(doc.page_content for doc in found) == sorted([AMENDMENT, VALUE])
+
+
+async def test_the_window_never_reads_another_owners_chunk(db: Db) -> None:
+    """Defence in depth: even handed a passage that points into Alice's
+    document - a bug upstream, a forged metadata - Bob's window reads nothing
+    of hers. The owner is filtered in the query itself."""
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [(AMENDMENT, 1), (VALUE, 0)], pages=[4, 4])
+    alices_passage = (await db.retriever(db.alice).ainvoke("combien je paie"))[0]
+
+    bobs_window = ContextWindowRetriever(
+        retriever=db.retriever(db.bob), engine=db.engine, owner_id=db.bob
+    )
+    widened = await bobs_window._widen([alices_passage])
+
+    assert widened[0].page_content == VALUE

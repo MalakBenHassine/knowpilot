@@ -21,12 +21,13 @@ from typing import Any, cast
 
 import groq
 import httpx
+from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from langchain_groq import ChatGroq
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -97,13 +98,21 @@ class LanguageModelUnavailableError(LanguageModelError):
 
 
 def create_chat_model(
-    api_key: str, model: str, http_client: httpx.AsyncClient | None = None
+    api_key: str,
+    model: str,
+    http_client: httpx.AsyncClient | None = None,
+    *,
+    max_tokens: int = MAX_OUTPUT_TOKENS,
 ) -> ChatGroq:
     """Build the provider client once, at startup.
 
     The shared `httpx.AsyncClient` is injected so one connection pool - and one
     TLS session - serves every question of the process, instead of a handshake
     per request.
+
+    `max_tokens` is lowered for the subject check, whose whole answer is a
+    short JSON list: a budget sized for a detailed answer would only be room
+    for a runaway.
     """
     if not api_key.strip():
         # Fail at construction, in the lifespan, where the message is read by
@@ -115,7 +124,7 @@ def create_chat_model(
         # string in a pydantic model is one `print(model)` away from a leak.
         api_key=SecretStr(api_key.strip()),
         temperature=TEMPERATURE,
-        max_tokens=MAX_OUTPUT_TOKENS,
+        max_tokens=max_tokens,
         reasoning_effort=REASONING_EFFORT,
         timeout=httpx.Timeout(READ_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
         max_retries=MAX_RETRIES,
@@ -227,3 +236,41 @@ class GuardedChain(Runnable[dict[str, Any], str]):
 def build_answer_chain(prompt: ChatPromptTemplate, model: BaseChatModel) -> GuardedChain:
     """prompt | model | parser, the canonical LCEL chain, with our guard on top."""
     return GuardedChain(prompt | model | StrOutputParser())
+
+
+def build_advisory_chain[SchemaT: BaseModel](
+    prompt: ChatPromptTemplate, model: BaseChatModel, schema: type[SchemaT]
+) -> Runnable[dict[str, Any], SchemaT | None]:
+    """prompt | model.with_structured_output(schema), failing OPEN to None.
+
+    For calls that improve an answer without deciding whether there is one -
+    the subject check of ADR-0018. If the provider refuses, times out or
+    returns JSON that does not fit the schema, the question is still answered
+    exactly as it was before the check existed. An advisory step that could
+    take answering down would turn an improvement into a new outage.
+
+    `with_structured_output` is LangChain's standard way to get typed output:
+    the schema is sent to the provider as a JSON schema and the reply is
+    validated into the pydantic model, so no reply is ever parsed by hand.
+    The fallback is `with_fallbacks`, restricted to the failures listed below:
+    a bug of ours - a TypeError, a KeyError - still raises, loudly.
+    """
+
+    def unavailable(inputs: dict[str, Any]) -> SchemaT | None:
+        # The type only: the message of a provider error carries the request.
+        logger.warning(
+            "advisory call failed (%s); answering without it", type(inputs["error"]).__name__
+        )
+        return None
+
+    structured = cast(
+        "Runnable[dict[str, Any], SchemaT | None]",
+        prompt | model.with_structured_output(schema, method="json_schema"),
+    )
+    fallback: Runnable[dict[str, Any], SchemaT | None] = RunnableLambda(unavailable)
+    return structured.with_fallbacks(
+        [fallback],
+        exceptions_to_handle=(*_PROVIDER_ERRORS, OutputParserException, ValidationError),
+        # Hands the exception to the fallback, which logs what went wrong.
+        exception_key="error",
+    )
