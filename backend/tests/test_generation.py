@@ -18,8 +18,11 @@ from app.rag.generation import (
     MAX_QUESTION_CHARACTERS,
     REFUSAL,
     Answer,
+    Delta,
+    Final,
     answer_question,
     format_passages,
+    stream_answer,
 )
 from tests.fakes import SpyChatModel, answer_chain, passage, passages, spy
 
@@ -286,4 +289,109 @@ def test_an_absurdly_long_question_is_refused_before_it_costs_tokens() -> None:
 
     with pytest.raises(ValueError):
         ask(model, passages(), question="a" * (MAX_QUESTION_CHARACTERS + 1))
+    assert model.calls == 0
+
+
+# --- Streaming: nothing unverified ever leaves --------------------------------
+#
+# FakeListChatModel streams its reply one character at a time, the harshest
+# possible chunking: every intermediate state of the text is observed.
+
+
+def stream(reply: str, found: list[Document] | None = None) -> list[Delta | Final]:
+    async def collect() -> list[Delta | Final]:
+        chain = answer_chain(spy(reply))
+        return [event async for event in stream_answer(QUESTION, found or passages(2), chain)]
+
+    return anyio.run(collect)
+
+
+def shown(events: list[Delta | Final]) -> str:
+    return "".join(event.text for event in events if isinstance(event, Delta))
+
+
+def final(events: list[Delta | Final]) -> Answer:
+    last = events[-1]
+    assert isinstance(last, Final)
+    return last.answer
+
+
+def test_nothing_is_shown_before_the_first_valid_citation() -> None:
+    events = stream("Docker est utilise [1]. Jenkins aussi [2].")
+
+    first = next(event for event in events if isinstance(event, Delta))
+    # The first release already contains the citation that grounds it.
+    assert "[1]" in first.text
+    assert shown(events) == "Docker est utilise [1]. Jenkins aussi [2]."
+
+
+def test_after_the_first_citation_the_rest_streams() -> None:
+    events = stream("Docker [1]. Puis une longue suite de texte.")
+
+    deltas = [event for event in events if isinstance(event, Delta)]
+    # More than one event: the text after the citation arrived progressively.
+    assert len(deltas) > 1
+
+
+def test_an_uncited_answer_is_never_shown() -> None:
+    events = stream("Malak maitrise Docker et Jenkins, sans aucune source. " * 3)
+
+    # Guard 3 would reject it, so not a character of it reaches the screen.
+    assert shown(events) == ""
+    assert final(events).is_grounded is False
+
+
+def test_the_refusal_word_is_never_shown() -> None:
+    events = stream(REFUSAL)
+
+    assert shown(events) == ""
+    assert final(events).is_grounded is False
+
+
+def test_a_citation_to_a_passage_we_did_not_send_releases_nothing() -> None:
+    # [7] out of two passages is not a valid citation, so it proves nothing.
+    events = stream("Kubernetes [7] est mentionne.")
+
+    assert shown(events) == ""
+    assert final(events).is_grounded is False
+
+
+def test_a_refusal_after_a_citation_is_retracted() -> None:
+    """The one case where streamed text must be withdrawn: rare, never silent."""
+    events = stream(f"Docker [1]. En fait {REFUSAL}")
+
+    assert "Docker [1]" in shown(events)
+    # The final verdict replaces what was shown.
+    assert final(events).is_grounded is False
+    # And the refusal word itself was never displayed.
+    assert REFUSAL not in shown(events)
+
+
+def test_fullwidth_brackets_release_the_text_too() -> None:
+    events = stream("Docker【1】 est utilise.")
+
+    assert shown(events).startswith("Docker[1]")
+    assert final(events).is_grounded is True
+
+
+def test_the_streamed_verdict_equals_the_blocking_one() -> None:
+    """One verdict function for both paths: they cannot disagree."""
+    reply = "Docker [1], Jenkins [2], et encore Docker [1]."
+    found = passages(2)
+
+    streamed = final(stream(reply, found))
+    blocking = ask(spy(reply), found)
+
+    assert streamed == blocking
+
+
+def test_without_passages_the_stream_never_calls_the_model() -> None:
+    model = spy()
+
+    async def collect() -> list[Delta | Final]:
+        return [event async for event in stream_answer(QUESTION, [], answer_chain(model))]
+
+    events = anyio.run(collect)
+
+    assert events == [Final(Answer(text="", citations=[], is_grounded=False))]
     assert model.calls == 0

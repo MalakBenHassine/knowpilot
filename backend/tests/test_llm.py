@@ -17,6 +17,7 @@ import pytest
 from app.rag.generation import ANSWER_PROMPT
 from app.rag.llm import (
     MAX_OUTPUT_TOKENS,
+    REASONING_EFFORT,
     LanguageModelUnavailableError,
     QuotaExhaustedError,
     build_answer_chain,
@@ -93,6 +94,9 @@ def test_the_request_carries_what_the_answer_depends_on() -> None:
     # asserting on the arguments we passed to it.
     assert body["temperature"] <= 1e-6
     assert body["max_tokens"] == MAX_OUTPUT_TOKENS
+    # gpt-oss reasons inside the output budget; low effort keeps it from
+    # spending the whole budget thinking and answering nothing.
+    assert body["reasoning_effort"] == REASONING_EFFORT
     assert [message["role"] for message in body["messages"]] == ["system", "user"]
     assert "Quels outils ?" in body["messages"][1]["content"]
 
@@ -204,3 +208,67 @@ def test_the_passages_never_reach_the_logs(caplog: pytest.LogCaptureFixture) -> 
     # The request carries a user's private document. Only status codes and
     # exception types may be logged by our code.
     assert "Docker est utilise" not in caplog.text
+
+
+# --- Streaming through the real ChatGroq ------------------------------------
+
+
+def sse(*contents: str) -> httpx.Response:
+    """A streamed completion, in the OpenAI-compatible format Groq sends."""
+    lines = []
+    for content in contents:
+        chunk = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "openai/gpt-oss-120b",
+            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+        }
+        lines.append(f"data: {json.dumps(chunk)}\n\n")
+    lines.append("data: [DONE]\n\n")
+    return httpx.Response(
+        200, headers={"content-type": "text/event-stream"}, content="".join(lines).encode()
+    )
+
+
+def stream(handler: Handler) -> list[str]:
+    async def call() -> list[str]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            chain = build_answer_chain(
+                ANSWER_PROMPT, create_chat_model(KEY, "openai/gpt-oss-120b", client)
+            )
+            return [chunk async for chunk in chain.astream(INPUTS)]
+
+    return anyio.run(call)
+
+
+def test_the_answer_arrives_in_pieces() -> None:
+    server = Recorder(sse("Docker", " est", " utilise [1]."))
+
+    chunks = stream(server)
+
+    assert "".join(chunks) == "Docker est utilise [1]."
+    assert len(chunks) >= 3
+    # The streaming API, not a blocking request replayed in one piece.
+    assert json.loads(server.requests[0].content)["stream"] is True
+
+
+def test_a_streamed_quota_refusal_is_translated() -> None:
+    server = Recorder(rate_limited("1", milliseconds="10"), rate_limited("9", milliseconds="10"))
+
+    with pytest.raises(QuotaExhaustedError) as caught:
+        stream(server)
+
+    assert caught.value.retry_after == 9
+
+
+def test_a_stream_that_says_nothing_is_a_failure() -> None:
+    with pytest.raises(LanguageModelUnavailableError):
+        stream(Recorder(sse("", "  ")))
+
+
+def test_the_synchronous_path_is_refused() -> None:
+    chain = build_answer_chain(ANSWER_PROMPT, create_chat_model(KEY, "openai/gpt-oss-120b"))
+
+    with pytest.raises(NotImplementedError):
+        chain.invoke(INPUTS)

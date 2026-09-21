@@ -107,6 +107,19 @@ class Settings(BaseSettings):
     # budget for context the question did not need.
     top_k: int = Field(default=8, ge=1, le=20)
 
+    # Hybrid retrieval (ADR-0015): full-text search beside the embeddings, for
+    # what embeddings cannot see - phone numbers, references, surnames. Off
+    # means vector-only, the behaviour the gain was measured against.
+    keyword_search_enabled: bool = True
+
+    # The share of the question's words a passage must contain to be admitted
+    # on keywords alone. 0.5 was measured: exact-value questions reach 0.7 to
+    # 1.0 on the passage that answers them, while the noise - a passage sharing
+    # "jour" or "quel" with the question - stays at 0.2 or below. It never
+    # affects passages admitted on meaning; it only decides which extra ones
+    # the keyword leg may add.
+    min_keyword_coverage: float = Field(default=0.5, gt=0.0, le=1.0)
+
     # --- Daily question budgets (ADR-0012) ---
     # Policy, not logic, which is why it lives here rather than as a constant
     # in the module that enforces it. The same code runs on a laptop with one

@@ -179,6 +179,55 @@ CASES: tuple[Case, ...] = (
             "there and never left the database."
         ),
     ),
+    Case(
+        name="answerable-in-detail",
+        asked_by=ALICE,
+        question=(
+            "Detaille toutes les regles du reglement interieur : conges, teletravail et horaires."
+        ),
+        expect_grounded=True,
+        must_contain=("25", "mardi"),
+        must_cite=HANDBOOK,
+        why=(
+            "A question asking for detail. gpt-oss reasons inside its output "
+            "budget, and at the default effort it spent all 700 tokens thinking "
+            "and answered nothing - a 503 on an answerable question, found by "
+            "the first real streamed request. Short questions never showed it."
+        ),
+    ),
+    # --- Exact values: what keyword search exists for ---------------------
+    #
+    # Embeddings capture meaning, and a phone number or a proper name has
+    # almost none: "04 72 55 18 90" is close to every other string of digits.
+    # These cases were added BEFORE the hybrid retriever and run against the
+    # vector-only version first, so the gain is measured rather than assumed.
+    Case(
+        name="exact-phone-number",
+        asked_by=ALICE,
+        question="A qui correspond le numero 04 72 55 18 90 ?",
+        expect_grounded=True,
+        must_contain=("Marchand",),
+        must_cite=MISCELLANEOUS,
+        why="A number carries no meaning an embedding can capture.",
+    ),
+    Case(
+        name="exact-second-number",
+        asked_by=ALICE,
+        question="A quoi sert le 06 12 44 87 23 ?",
+        expect_grounded=True,
+        must_contain=("astreinte",),
+        must_cite=MISCELLANEOUS,
+        why="A second number in the same chunk: the model must pick the right one.",
+    ),
+    Case(
+        name="exact-proper-name",
+        asked_by=ALICE,
+        question="Cabinet Marchand",
+        expect_grounded=True,
+        must_contain=("syndic",),
+        must_cite=MISCELLANEOUS,
+        why="A bare name typed like a search box, the way users actually type.",
+    ),
     # --- It refuses what it cannot ----------------------------------------
     Case(
         name="unanswerable-plausible",

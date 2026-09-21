@@ -18,9 +18,10 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # The distance ceiling and the number of passages are NOT here. They are
 # retrieval policy, tuned against the evaluation harness, and they live in the
-# settings (see OwnerScopedRetriever). By the time `answer_question` runs, the
+# settings (see app/rag/retrieval.py). By the time `answer_question` runs, the
 # filtering has already happened.
 
 # A question longer than this is a paste, a mistake or an attack. Refusing it
@@ -161,17 +162,22 @@ def _cite(number: int, passage: Document) -> Citation:
     )
 
 
+def _checked(question: str) -> str:
+    question = question.strip()
+    if not question:
+        raise ValueError("the question is empty")
+    if len(question) > MAX_QUESTION_CHARACTERS:
+        raise ValueError(f"the question exceeds {MAX_QUESTION_CHARACTERS} characters")
+    return question
+
+
 async def answer_question(
     question: str,
     passages: Sequence[Document],
     chain: Runnable[dict[str, Any], str],
 ) -> Answer:
     """Answer strictly from the passages, or admit that it cannot."""
-    question = question.strip()
-    if not question:
-        raise ValueError("the question is empty")
-    if len(question) > MAX_QUESTION_CHARACTERS:
-        raise ValueError(f"the question exceeds {MAX_QUESTION_CHARACTERS} characters")
+    question = _checked(question)
 
     # Guard 1, the only one that cannot be argued with: with nothing close
     # enough to the question, the chain is not invoked at all.
@@ -179,6 +185,84 @@ async def answer_question(
         return UNGROUNDED
 
     reply = await chain.ainvoke({"passages": format_passages(passages), "question": question})
+    return _verdict(reply, passages)
+
+
+@dataclass(frozen=True)
+class Delta:
+    """Verified text to append to what the user already sees."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class Final:
+    """The authoritative answer. Replaces whatever was streamed before it."""
+
+    answer: Answer
+
+
+async def stream_answer(
+    question: str,
+    passages: Sequence[Document],
+    chain: Runnable[dict[str, Any], str],
+) -> AsyncIterator[Delta | Final]:
+    """Stream an answer WITHOUT ever showing text the guards would reject.
+
+    Guard 3 grounds an answer as soon as it contains ONE valid citation. So
+    nothing is released until the first valid citation has been generated:
+    before it, the text may still end up refused; from it on, the verdict can
+    no longer be "unsourced". The held text is then released at once, and the
+    rest follows token by token.
+
+    One case remains: the refusal word arriving AFTER a citation. Generation is
+    stopped there - tokens are not paid for text nobody will see - and the
+    Final event says `is_grounded=False`, which the client renders by replacing
+    what it showed. Rare, and never silent.
+
+    The cost, stated honestly: a one-sentence answer whose citation comes at
+    its end is delivered in one piece. Streaming shows on longer answers.
+    """
+    question = _checked(question)
+    if not passages:
+        yield Final(UNGROUNDED)
+        return
+
+    reply = ""
+    released = 0
+    stream = cast(
+        "AsyncGenerator[str, None]",
+        chain.astream({"passages": format_passages(passages), "question": question}),
+    )
+    # `aclosing`, because `break` inside `async for` does NOT close an async
+    # generator: it would be finalised whenever the garbage collector gets to
+    # it, and until then the HTTP stream to the provider stays open - still
+    # generating, still billed. Closing it is what actually stops the model.
+    async with aclosing(stream):
+        async for chunk in stream:
+            reply += chunk
+            # Normalised as it grows: the translation is one character for one
+            # character, so offsets into the normalised text stay valid.
+            shown = _normalise_citations(reply)
+            if REFUSAL in shown:
+                break  # guard 2 has decided; stop paying for the rest
+            if released == 0 and not _valid_citations(shown, len(passages)):
+                continue  # still unverified: hold it back
+            # Leading whitespace is never worth an event of its own.
+            start = released if released else len(shown) - len(shown.lstrip())
+            if len(shown) > start:
+                yield Delta(shown[start:])
+                released = len(shown)
+
+    yield Final(_verdict(reply, passages))
+
+
+def _verdict(reply: str, passages: Sequence[Document]) -> Answer:
+    """Guards 2 and 3, shared by the blocking and the streaming paths.
+
+    One implementation, so the streamed answer and the returned one can never
+    disagree about what is grounded.
+    """
     raw = _normalise_citations(reply.strip())
 
     # Guard 2: the model was asked to say this word rather than invent. Asking

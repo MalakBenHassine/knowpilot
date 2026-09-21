@@ -21,6 +21,7 @@ from app.db.session import create_engine, create_session_factory
 from app.db.vector_store import create_vector_store, load_checked_embeddings
 from app.rag.generation import ANSWER_PROMPT
 from app.rag.llm import build_answer_chain, create_chat_model
+from app.rag.retrieval import RetrieverFactory
 
 settings = get_settings()
 # Before anything else: a module that logs during import would otherwise write
@@ -74,13 +75,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The API only embeds questions; the worker embeds documents. Both load the
     # same model, from the same setting, because a question and a passage must
     # land in the same vector space for their distance to mean anything.
-    app.state.vector_store = None
+    app.state.retrievers = None
     if settings.embeddings_enabled:
         embeddings = load_checked_embeddings(settings.embedding_model, settings.embedding_cache_dir)
-        app.state.vector_store = await create_vector_store(engine, embeddings)
+        app.state.retrievers = RetrieverFactory(
+            await create_vector_store(engine, embeddings),
+            k=settings.top_k,
+            max_distance=settings.max_distance,
+            # None turns the keyword leg off: vector-only retrieval.
+            engine=engine if settings.keyword_search_enabled else None,
+            min_keyword_coverage=settings.min_keyword_coverage,
+        )
 
         async def embeddings_ready() -> bool:
-            return app.state.vector_store is not None
+            return app.state.retrievers is not None
 
         health.READINESS_CHECKS["embeddings"] = embeddings_ready
 

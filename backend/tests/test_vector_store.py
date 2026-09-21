@@ -32,7 +32,7 @@ from app.db.vector_store import (
     delete_document,
     replace_document_chunks,
 )
-from app.rag.retrieval import OwnerScopedRetriever
+from app.rag.retrieval import KeywordRetriever, SemanticRetriever
 from tests.conftest import requires_database
 
 MODEL = "BAAI/bge-m3"
@@ -108,8 +108,8 @@ class Db:
             )
             return int(result.scalar_one())
 
-    def retriever(self, owner_id: str, max_distance: float = 0.6) -> OwnerScopedRetriever:
-        return OwnerScopedRetriever(
+    def retriever(self, owner_id: str, max_distance: float = 0.6) -> SemanticRetriever:
+        return SemanticRetriever(
             vector_store=self.store, owner_id=owner_id, k=8, max_distance=max_distance
         )
 
@@ -249,3 +249,64 @@ async def test_reindexing_cannot_touch_another_owners_chunks(db: Db) -> None:
     await db.index(db.alice, bob_document, [])
 
     assert await db.count(bob_document) == 1
+
+
+# --- KeywordRetriever: full-text search on the same table ------------------
+
+
+def keywords(db: Db, owner_id: str) -> KeywordRetriever:
+    return KeywordRetriever(engine=db.engine, owner_id=owner_id, k=8)
+
+
+async def test_a_phone_number_is_found_by_its_digits(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(
+        db.alice,
+        document_id,
+        [("Le syndic est le Cabinet Marchand, joignable au 04 72 55 18 90.", 0), ("Autre.", 1)],
+    )
+
+    found = await keywords(db, db.alice).ainvoke("A qui correspond le 04 72 55 18 90 ?")
+
+    assert "Marchand" in found[0].page_content
+    assert found[0].metadata["document_id"] == document_id
+    assert found[0].metadata["keyword_coverage"] >= 0.5
+
+
+async def test_accents_do_not_matter_either_way(db: Db) -> None:
+    # Users type "numero" and "conges"; documents say "numéro" and "congés".
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [("Le numéro des congés payés.", 0)])
+
+    found = await keywords(db, db.alice).ainvoke("numero conges payes")
+
+    assert found
+    assert found[0].metadata["keyword_coverage"] == 1.0
+
+
+async def test_keyword_search_never_reaches_another_owner(db: Db) -> None:
+    bob_document = await db.document(db.bob)
+    await db.index(db.bob, bob_document, [("Le salaire de Bob Martin est de 68000 euros.", 0)])
+
+    # A perfect lexical match - in somebody else's library.
+    assert await keywords(db, db.alice).ainvoke("salaire Bob Martin 68000") == []
+
+
+async def test_a_question_of_stop_words_matches_nothing(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [("Le la les de du des.", 0)])
+
+    # Nothing meaningful left once the stop words are removed: no division by
+    # zero, and no match on everything.
+    assert await keywords(db, db.alice).ainvoke("le la les ?") == []
+
+
+async def test_sql_in_the_question_is_just_words(db: Db) -> None:
+    document_id = await db.document(db.alice)
+    await db.index(db.alice, document_id, [("Texte ordinaire.", 0)])
+
+    # The question is a bound parameter, parsed by PostgreSQL as text.
+    found = await keywords(db, db.alice).ainvoke("x'); DROP TABLE document_chunks; --")
+
+    assert found == []
+    assert await db.count(document_id) == 1

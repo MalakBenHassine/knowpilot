@@ -14,6 +14,7 @@ The same isolation, proven against real PostgreSQL through the real
 PGVectorStore, lives in test_vector_store.py.
 """
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -24,13 +25,14 @@ from app.api.deps import (
     current_session,
     get_answer_chain,
     get_quota_tracker,
-    get_vector_store,
+    get_retrievers,
     require_csrf,
 )
 from app.core.quota import QuotaTracker
 from app.main import app
 from app.rag.generation import REFUSAL
 from app.rag.llm import LanguageModelUnavailableError, QuotaExhaustedError
+from app.rag.retrieval import RetrieverFactory
 from app.schemas.chat import SNIPPET_CHARACTERS
 from tests.fakes import FakeVectorStore, SpyChatModel, answer_chain, passage, spy
 from tests.test_documents_api import signed_in_as
@@ -51,6 +53,10 @@ class FailingChain:
 
     async def ainvoke(self, inputs: dict[str, Any]) -> str:
         raise self.error
+
+    async def astream(self, inputs: dict[str, Any]) -> AsyncIterator[str]:
+        raise self.error
+        yield ""  # unreachable: it only makes this an async generator
 
 
 @pytest.fixture
@@ -82,7 +88,11 @@ async def client(
     """The real application with its edges replaced, and nothing else."""
     app.dependency_overrides[current_session] = lambda: signed_in_as(ALICE)
     app.dependency_overrides[require_csrf] = lambda: signed_in_as(ALICE)
-    app.dependency_overrides[get_vector_store] = lambda: store
+    # Vector-only (no engine): the keyword leg is tested against PostgreSQL in
+    # test_vector_store.py. What matters here is the flow around retrieval.
+    app.dependency_overrides[get_retrievers] = lambda: RetrieverFactory(
+        store, k=8, max_distance=0.6
+    )
     app.dependency_overrides[get_answer_chain] = lambda: answer_chain(model)
     app.dependency_overrides[get_quota_tracker] = lambda: quota
 
@@ -134,12 +144,12 @@ async def test_an_owner_sent_in_the_body_is_ignored(
     assert store.filters == [{"owner_id": {"$eq": ALICE}}]
 
 
-async def test_the_retrieval_policy_comes_from_the_settings(
+async def test_the_retrieval_policy_reaches_the_store(
     client: AsyncClient, store: FakeVectorStore
 ) -> None:
     await client.post("/api/chat", **ask())
 
-    assert store.k == [8]  # KP_TOP_K default
+    assert store.k == [8]
     assert store.queries == ["Combien de jours de conges ?"]
 
 
@@ -332,3 +342,115 @@ async def test_an_oversized_question_is_refused_before_it_costs_anything(
     assert response.status_code == 422
     assert store.queries == []
     assert redis.values == {}
+
+
+# --- POST /api/chat/stream ---------------------------------------------------
+
+
+def events_of(body: str) -> list[tuple[str, dict[str, Any]]]:
+    """Parse a Server-Sent Events body into (event, data) pairs."""
+    parsed = []
+    for block in body.strip().split("\n\n"):
+        fields = dict(line.split(": ", 1) for line in block.splitlines())
+        parsed.append((fields["event"], json.loads(fields["data"])))
+    return parsed
+
+
+async def test_a_streamed_answer_ends_with_the_authoritative_one(
+    client: AsyncClient, store: FakeVectorStore
+) -> None:
+    store.hits = [(passage(CONGES, filename="conges.pdf"), 0.2)]
+
+    response = await client.post("/api/chat/stream", **ask())
+    events = events_of(response.text)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    # A buffering proxy would hold the whole answer and defeat the point.
+    assert response.headers["x-accel-buffering"] == "no"
+    names = [name for name, _ in events]
+    assert names[0] == "stage"
+    assert names[-1] == "done"
+    assert "token" in names
+    streamed = "".join(data["text"] for name, data in events if name == "token")
+    done = events[-1][1]
+    assert done["is_grounded"] is True
+    assert done["answer"] == streamed
+    assert done["citations"][0]["filename"] == "conges.pdf"
+
+
+async def test_an_unsourced_answer_is_never_streamed(
+    client: AsyncClient, store: FakeVectorStore
+) -> None:
+    store.hits = [(passage(CONGES), 0.2)]
+    app.dependency_overrides[get_answer_chain] = lambda: answer_chain(
+        spy("Vous avez droit a 25 jours, faites-moi confiance.")
+    )
+
+    events = events_of((await client.post("/api/chat/stream", **ask())).text)
+
+    assert [name for name, _ in events] == ["stage", "done"]
+    assert events[-1][1]["is_grounded"] is False
+
+
+async def test_nothing_found_is_a_single_done_event(
+    client: AsyncClient, model: SpyChatModel, redis: FakeRedis
+) -> None:
+    events = events_of((await client.post("/api/chat/stream", **ask())).text)
+
+    assert events == [("done", {"answer": "", "citations": [], "is_grounded": False})]
+    assert model.calls == 0
+    assert redis.values == {}
+
+
+async def test_a_spent_budget_fails_before_the_stream_opens(
+    client: AsyncClient, store: FakeVectorStore
+) -> None:
+    store.hits = [(passage(CONGES), 0.2)]
+    for _ in range(3):
+        await client.post("/api/chat", **ask())
+
+    response = await client.post("/api/chat/stream", **ask())
+
+    # A real status code, because nothing had been sent yet.
+    assert response.status_code == 429
+    assert int(response.headers["retry-after"]) > 0
+
+
+async def test_a_failure_mid_stream_is_an_event_and_is_refunded(
+    client: AsyncClient, store: FakeVectorStore, redis: FakeRedis
+) -> None:
+    store.hits = [(passage(CONGES), 0.2)]
+    app.dependency_overrides[get_answer_chain] = lambda: FailingChain(
+        LanguageModelUnavailableError("groq is unreachable")
+    )
+
+    response = await client.post("/api/chat/stream", **ask())
+    events = events_of(response.text)
+
+    # The 200 was already sent: the failure travels as an event.
+    assert response.status_code == 200
+    assert events[-1] == ("error", {"kind": "server"})
+    assert user_key(ALICE) not in redis.values
+
+
+async def test_the_provider_limit_mid_stream_says_when_to_come_back(
+    client: AsyncClient, store: FakeVectorStore, redis: FakeRedis
+) -> None:
+    store.hits = [(passage(CONGES), 0.2)]
+    app.dependency_overrides[get_answer_chain] = lambda: FailingChain(
+        QuotaExhaustedError(retry_after=1800)
+    )
+
+    events = events_of((await client.post("/api/chat/stream", **ask())).text)
+
+    assert events[-1] == ("error", {"kind": "rate_limited", "retry_after": 1800})
+    assert user_key(ALICE) not in redis.values
+
+
+async def test_the_stream_is_not_open_to_anonymous_requests() -> None:
+    app.state.session_store = None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+        response = await http.post("/api/chat/stream", **ask())
+
+    assert response.status_code == 401

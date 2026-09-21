@@ -15,14 +15,16 @@ And every wait is bounded, because an unbounded wait is a leaked resource.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
+from typing import Any, cast
 
 import groq
 import httpx
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_groq import ChatGroq
 from pydantic import SecretStr
 
@@ -50,9 +52,28 @@ MAX_RETRIES = 1
 # of several hours shown to the user.
 FALLBACK_RETRY_AFTER_SECONDS = 5.0
 
+# gpt-oss REASONS before it answers, and the reasoning is drawn from the same
+# output budget as the answer. Found by the first real streamed question: asked
+# for a detailed answer, the model spent all 700 tokens thinking and returned
+# nothing - a 503 on a perfectly answerable question, in both the streamed and
+# the blocking path. Measured on that question:
+#
+#   effort   max_tokens   finish   answer        tokens used   reasoning
+#   medium      700       length   0 chars           700       2977 chars
+#   medium     1200       length   1440 chars cut   1200       3240 chars
+#   low         700       stop     2060 chars        680        436 chars
+#   low        1200       stop     2048 chars        670        417 chars
+#
+# "low": answering from passages already chosen by retrieval needs little
+# deliberation - the hard part, finding the evidence, is done - and the
+# reasoning shrinks sevenfold. The evaluation harness confirmed the quality.
+REASONING_EFFORT = "low"
+
 # Output tokens are billed against the same daily budget as input tokens, so a
-# runaway answer is taken out of every other user of the day.
-MAX_OUTPUT_TOKENS = 700
+# runaway answer is taken out of every other user of the day. 1000 rather than
+# the 680 a detailed answer measured: headroom, so a long answer is not cut
+# mid-sentence - and mid-citation.
+MAX_OUTPUT_TOKENS = 1000
 
 # Zero: the same question over the same passages must produce the same answer.
 # Creativity is the failure mode this project exists to avoid.
@@ -95,6 +116,7 @@ def create_chat_model(
         api_key=SecretStr(api_key.strip()),
         temperature=TEMPERATURE,
         max_tokens=MAX_OUTPUT_TOKENS,
+        reasoning_effort=REASONING_EFFORT,
         timeout=httpx.Timeout(READ_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
         max_retries=MAX_RETRIES,
         http_async_client=http_client,
@@ -137,33 +159,71 @@ def _translate(error: Exception) -> LanguageModelError:
     return LanguageModelUnavailableError(type(error).__name__)
 
 
-def guarded(chain: Runnable[dict[str, Any], str]) -> Runnable[dict[str, Any], str]:
-    """Wrap a chain so it raises only `LanguageModelError`.
+# The provider exceptions we translate. httpx errors are listed too: a stream
+# that breaks halfway can surface the transport's exception rather than the
+# SDK's, and it must not escape as a 500.
+_PROVIDER_ERRORS = (groq.GroqError, httpx.HTTPError)
 
-    A `RunnableLambda` rather than a try/except at the call site: the result is
-    still a Runnable, so it composes, streams and traces like the chain it
-    wraps, and every caller gets the translation without writing it.
+
+def _unavailable_if_empty() -> LanguageModelUnavailableError:
+    # A 200 with nothing in it is a provider malfunction. Returning "" would
+    # reach the guards in `generation` and surface as "the passages do not
+    # answer that" - an honest-sounding sentence about something that never
+    # happened.
+    logger.warning("groq returned an empty answer")
+    return LanguageModelUnavailableError("empty answer")
+
+
+class GuardedChain(Runnable[dict[str, Any], str]):
+    """A chain that raises only `LanguageModelError`, whether invoked or streamed.
+
+    A Runnable subclass rather than a RunnableLambda: a lambda wrapping
+    `ainvoke` cannot stream - it would wait for the whole answer and hand it
+    over in one piece, silently turning `astream` into `ainvoke`. Implementing
+    both methods keeps each path native: `ainvoke` makes one ordinary request,
+    `astream` consumes the provider's stream token by token.
+
+    Async only, like everything that talks to the network in this service.
     """
 
-    async def invoke(inputs: dict[str, Any]) -> str:
+    def __init__(self, chain: Runnable[dict[str, Any], str]) -> None:
+        self.chain = chain
+
+    def invoke(
+        self, input: dict[str, Any], config: RunnableConfig | None = None, **kwargs: Any
+    ) -> str:
+        raise NotImplementedError("use ainvoke or astream: generation is async-only")
+
+    async def ainvoke(
+        self, input: dict[str, Any], config: RunnableConfig | None = None, **kwargs: Any
+    ) -> str:
         try:
-            reply = await chain.ainvoke(inputs)
-        except groq.GroqError as error:
+            reply = await self.chain.ainvoke(input, config, **kwargs)
+        except _PROVIDER_ERRORS as error:
             raise _translate(error) from error
         if not reply.strip():
-            # A 200 with nothing in it is a provider malfunction. Returning ""
-            # would reach the guards in `generation` and surface as "the
-            # passages do not answer that" - an honest-sounding sentence about
-            # something that never happened.
-            logger.warning("groq returned an empty answer")
-            raise LanguageModelUnavailableError("empty answer")
+            raise _unavailable_if_empty()
         return reply
 
-    return RunnableLambda(invoke, name="guarded_generation")
+    async def astream(
+        self, input: dict[str, Any], config: RunnableConfig | None = None, **kwargs: Any | None
+    ) -> AsyncIterator[str]:
+        produced = False
+        stream = cast("AsyncGenerator[str, None]", self.chain.astream(input, config, **kwargs))
+        try:
+            # Closed explicitly, so that a consumer closing THIS generator
+            # closes the provider's stream too, instead of leaving it open
+            # until garbage collection.
+            async with aclosing(stream):
+                async for chunk in stream:
+                    produced = produced or bool(chunk.strip())
+                    yield chunk
+        except _PROVIDER_ERRORS as error:
+            raise _translate(error) from error
+        if not produced:
+            raise _unavailable_if_empty()
 
 
-def build_answer_chain(
-    prompt: ChatPromptTemplate, model: BaseChatModel
-) -> Runnable[dict[str, Any], str]:
+def build_answer_chain(prompt: ChatPromptTemplate, model: BaseChatModel) -> GuardedChain:
     """prompt | model | parser, the canonical LCEL chain, with our guard on top."""
-    return guarded(prompt | model | StrOutputParser())
+    return GuardedChain(prompt | model | StrOutputParser())

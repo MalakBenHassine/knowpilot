@@ -37,7 +37,7 @@ from app.db.session import create_engine, create_session_factory
 from app.rag.generation import ANSWER_PROMPT, Answer, answer_question
 from app.rag.llm import build_answer_chain, create_chat_model
 from app.rag.pipeline import ingest_document
-from app.rag.retrieval import OwnerScopedRetriever
+from app.rag.retrieval import RetrieverFactory
 from evals.dataset import ALL_OWNERS, CASES, FIXTURES, Case
 
 GREEN, RED, YELLOW, GREY, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[0m"
@@ -132,16 +132,10 @@ async def ingest_fixtures(  # type: ignore[no-untyped-def]
     return created
 
 
-async def run_case(case: Case, vectors, chain, settings) -> Outcome:  # type: ignore[no-untyped-def]
+async def run_case(case: Case, retrievers: RetrieverFactory, chain) -> Outcome:  # type: ignore[no-untyped-def]
     """The exact retriever and chain POST /api/chat runs, minus HTTP and quota."""
     started = time.monotonic()
-    retriever = OwnerScopedRetriever(
-        vector_store=vectors,
-        owner_id=case.asked_by,
-        k=settings.top_k,
-        max_distance=settings.max_distance,
-    )
-    passages = await retriever.ainvoke(case.question)
+    passages = await retrievers.for_owner(case.asked_by).ainvoke(case.question)
     answer = await answer_question(case.question, passages, chain)
     return Outcome(
         case=case,
@@ -210,7 +204,8 @@ async def main() -> int:
 
     print(
         f"model={settings.groq_model}  embeddings={settings.embedding_model}  "
-        f"max_distance={settings.max_distance}  top_k={settings.top_k}"
+        f"max_distance={settings.max_distance}  top_k={settings.top_k}  "
+        f"keywords={settings.keyword_search_enabled}  coverage={settings.min_keyword_coverage}"
     )
     print(f"{GREY}loading the embedding model...{RESET}")
     embeddings = vector_store.load_checked_embeddings(
@@ -229,7 +224,14 @@ async def main() -> int:
         try:
             await cleanup(factory, storage)  # in case a previous run was interrupted
             await ingest_fixtures(factory, vectors, embeddings, settings, storage)
-            outcomes = [await run_case(case, vectors, chain, settings) for case in CASES]
+            retrievers = RetrieverFactory(
+                vectors,
+                k=settings.top_k,
+                max_distance=settings.max_distance,
+                engine=engine if settings.keyword_search_enabled else None,
+                min_keyword_coverage=settings.min_keyword_coverage,
+            )
+            outcomes = [await run_case(case, retrievers, chain) for case in CASES]
             code = report(outcomes)
         finally:
             await cleanup(factory, storage)

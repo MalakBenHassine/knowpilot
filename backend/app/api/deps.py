@@ -5,27 +5,13 @@ from typing import Annotated, Any
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from langchain_core.runnables import Runnable
-from langchain_core.vectorstores import VectorStore
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import Settings, get_settings
 from app.core.queue import JobQueue
 from app.core.quota import QuotaTracker
 from app.core.session import SessionData, SessionStore
 from app.core.storage import FileStorage
-
-
-def get_config() -> Settings:
-    """The settings, as a dependency rather than a module-level import.
-
-    `get_settings` is cached, so this costs nothing; what it buys is a test
-    that can override one value without touching the environment of the
-    whole process - which is how a retrieval threshold gets measured.
-    """
-    return get_settings()
-
-
-Config = Annotated[Settings, Depends(get_config)]
+from app.rag.retrieval import RetrieverFactory
 
 
 def get_session_store(request: Request) -> SessionStore:
@@ -41,19 +27,19 @@ def get_file_storage(request: Request) -> FileStorage:
 Storage = Annotated[FileStorage, Depends(get_file_storage)]
 
 
-def get_vector_store(request: Request) -> VectorStore:
-    """The LangChain vector store over document_chunks, or 503.
+def get_retrievers(request: Request) -> RetrieverFactory:
+    """Builds the owner-scoped retriever of a request, or 503.
 
     None means the embedding model is disabled in this process: a question
     cannot be embedded, so it cannot be searched.
     """
-    store: VectorStore | None = request.app.state.vector_store
-    if store is None:
+    factory: RetrieverFactory | None = request.app.state.retrievers
+    if factory is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Answering is unavailable")
-    return store
+    return factory
 
 
-Vectors = Annotated[VectorStore, Depends(get_vector_store)]
+Retrievers = Annotated[RetrieverFactory, Depends(get_retrievers)]
 
 
 def get_job_queue(request: Request) -> JobQueue:
