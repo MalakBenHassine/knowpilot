@@ -25,7 +25,11 @@ from app.rag.llm import (
 )
 
 KEY = "gsk_test_not_a_real_key"
-INPUTS = {"passages": "[1] Docker est utilise.", "question": "Quels outils ?"}
+INPUTS = {
+    "passages": "[1] (document A) Docker est utilise.",
+    "question": "Quels outils ?",
+    "today": "2026-09-21",
+}
 
 Handler = Callable[[httpx.Request], httpx.Response]
 

@@ -30,6 +30,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.documents import Document
 
 from app.api.deps import AnswerChain, CsrfProtected, Quota, Retrievers
+from app.core.clock import today
 from app.core.quota import QuotaExceededError, QuotaTracker
 from app.rag.generation import Delta, answer_question, stream_answer
 from app.rag.llm import LanguageModelError, QuotaExhaustedError
@@ -113,7 +114,7 @@ async def ask(
     #    types (llm.GuardedChain), so this handler never has to know that Groq
     #    exists.
     try:
-        answer = await answer_question(payload.question, passages, chain)
+        answer = await answer_question(payload.question, passages, chain, today=today())
     except QuotaExhaustedError as exc:
         # Their budget, not ours: our counter was wrong about the real one, so
         # the user keeps the question they could not use.
@@ -179,7 +180,7 @@ async def ask_streaming(
         # it with a timer.
         yield _event("stage", {"stage": "generating"})
         try:
-            async for event in stream_answer(payload.question, passages, chain):
+            async for event in stream_answer(payload.question, passages, chain, today=today()):
                 if isinstance(event, Delta):
                     yield _event("token", {"text": event.text})
                 else:

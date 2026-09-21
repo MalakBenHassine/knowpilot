@@ -63,9 +63,23 @@ CHUNK_OVERLAP = 100
 
 # Tried in order: cut on a boundary the author wrote rather than on an
 # arbitrary character. A paragraph break is a human saying "new idea here".
+#
+# Sentence BEFORE line, and the order is measured. In text extracted from a
+# PDF, "\n" is not the author's line break but the layout's: every visual line
+# ends with one. Line-first, the splitter cut "...mise en circulation le 12" |
+# "mars 2023 et immatriculée GH-482-KT": the car and its plate landed in two
+# chunks, and the model rightly refused to connect them. And the overlap did
+# not save it - LangChain overlaps whole pieces, and a 105-character line does
+# not fit in a 100-character overlap, so the overlap was zero.
+#
+#   on the real 4-page contract   chunks   cut mid-sentence   plate with car
+#   line first                      11            7               no
+#   sentence first                  12            2               yes
+#
+# The two remaining cuts are table rows, which have no full stop to cut on.
 # The empty string last guarantees termination: a table or a long identifier
 # with no boundary at all is still cut, rather than kept as one huge chunk.
-SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+SEPARATORS = ["\n\n", ". ", "\n", " ", ""]
 
 
 def build_splitter(

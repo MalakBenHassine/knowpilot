@@ -28,6 +28,7 @@ from pathlib import Path
 
 import httpx
 
+from app.core.clock import today
 from app.core.config import get_settings
 from app.core.storage import FileStorage
 from app.db import documents as repository
@@ -136,7 +137,7 @@ async def run_case(case: Case, retrievers: RetrieverFactory, chain) -> Outcome: 
     """The exact retriever and chain POST /api/chat runs, minus HTTP and quota."""
     started = time.monotonic()
     passages = await retrievers.for_owner(case.asked_by).ainvoke(case.question)
-    answer = await answer_question(case.question, passages, chain)
+    answer = await answer_question(case.question, passages, chain, today=today())
     return Outcome(
         case=case,
         answer=answer,

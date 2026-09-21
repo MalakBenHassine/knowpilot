@@ -19,6 +19,7 @@ HANDBOOK = "reglement-interieur.txt"
 SECURITY = "politique-securite.txt"
 MISCELLANEOUS = "informations-diverses.txt"
 PAYROLL = "salaires-bob.txt"
+VEHICLE = "assurance-auto.txt"
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,37 @@ FIXTURES: tuple[Fixture, ...] = (
             "joignable au 04 72 55 18 90 du lundi au vendredi de 9 heures à 17 "
             "heures. En cas d'urgence technique en dehors de ces horaires, le "
             "numéro d'astreinte est le 06 12 44 87 23."
+        ),
+    ),
+    Fixture(
+        owner_id=ALICE,
+        filename=VEHICLE,
+        # Page 1 of a real PDF, wrapped EXACTLY as pypdf extracted it: every
+        # visual line ends with a newline, mid-sentence. Splitting on lines
+        # before sentences put the car and its plate in two chunks with no
+        # overlap, and the model rightly refused to connect them. A fixture
+        # with tidy lines would not reproduce it, so the wrapping is the point.
+        text=(
+            "Contrat d'assurance automobile — Horizon Mutuelle\n"
+            "Conditions particulières — Formule Tous Risques Confort\n"
+            "Numéro de contrat : HZ-2026-448217. Le présent contrat est conclu entre la "
+            "société Horizon Mutuelle,\n"
+            "société d'assurance mutuelle dont le siège est situé 18 quai Perrache, 69002 "
+            "Lyon, ci-après « l'assureur »,\n"
+            "et Monsieur Julien Moreau, demeurant 7 rue des Tanneurs, 69007 Lyon, ci-après "
+            "« l'assuré ».\n"
+            "Article 1 — Véhicule assuré\n"
+            "Le véhicule assuré est une Peugeot 308 SW, motorisation hybride rechargeable, "
+            "mise en circulation le 12\n"
+            "mars 2023 et immatriculée GH-482-KT. Le véhicule est garé la nuit dans un "
+            "parking souterrain fermé. Il\n"
+            "est utilisé pour les déplacements privés et le trajet domicile-travail ; tout "
+            "usage professionnel (tournées,\n"
+            "livraisons, transport de personnes à titre onéreux) est exclu.\n"
+            "Article 2 — Conducteurs désignés\n"
+            "Le conducteur principal est Monsieur Julien Moreau, titulaire du permis B depuis "
+            "2011. Le conducteur\n"
+            "secondaire désigné est Madame Camille Moreau, titulaire du permis B depuis 2019."
         ),
     ),
     Fixture(
@@ -228,7 +260,33 @@ CASES: tuple[Case, ...] = (
         must_cite=MISCELLANEOUS,
         why="A bare name typed like a search box, the way users actually type.",
     ),
+    Case(
+        name="answerable-across-a-layout-line-break",
+        asked_by=ALICE,
+        question="A quel vehicule correspond l immatriculation GH-482-KT ?",
+        expect_grounded=True,
+        must_contain=("308",),
+        must_cite=VEHICLE,
+        why=(
+            "Found by a manual test on a real PDF: the plate and the car were one "
+            "sentence, wrapped over two visual lines, and the splitter cut there."
+        ),
+    ),
     # --- It refuses what it cannot ----------------------------------------
+    Case(
+        name="unanswerable-by-generalisation",
+        asked_by=ALICE,
+        question="Quelle doit etre la longueur du code PIN de mon telephone ?",
+        expect_grounded=False,
+        must_not_contain=("douze",),
+        why=(
+            "The security policy sets rules for PASSWORDS. A model that decides a "
+            "phone PIN is a kind of password answers twelve characters, with a "
+            "valid citation - found by a manual test, where a broken wing mirror "
+            "was given the windscreen deductible. Citation-checking cannot catch "
+            "it: the citation is real, the claim is not in the document."
+        ),
+    ),
     Case(
         name="unanswerable-plausible",
         asked_by=ALICE,

@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +21,11 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     # Public name of the service; never includes a version (see contract.md).
     service_name: str = "knowpilot-api"
+    # The calendar the users live in. It decides which day "today" is when an
+    # answer depends on a date - an amendment in force from the 1st, a
+    # deadline. Validated at startup: a typo would otherwise surface as a
+    # crash on the first question.
+    timezone: str = "Europe/Paris"
 
     # --- OIDC (Keycloak) ---
     oidc_issuer: str = "http://localhost:8080/realms/knowpilot"
@@ -166,6 +172,15 @@ class Settings(BaseSettings):
         the one that slips through.
         """
         return value.strip()
+
+    @field_validator("timezone", mode="after")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown timezone {value!r}, expected e.g. Europe/Paris") from exc
+        return value
 
     @property
     def generation_enabled(self) -> bool:

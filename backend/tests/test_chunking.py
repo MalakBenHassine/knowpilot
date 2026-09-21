@@ -174,3 +174,35 @@ def test_the_pages_given_are_not_modified() -> None:
 
     # chunk_index is written on the chunks, never on the caller's pages.
     assert "chunk_index" not in source[0].metadata
+
+
+def test_a_sentence_wrapped_by_the_pdf_layout_stays_whole() -> None:
+    """The car and its plate, cut apart by a visual line break.
+
+    Text extracted from a PDF ends every visual line with "\n". Splitting on
+    lines before sentences cut "...mise en circulation le 12" | "mars 2023 et
+    immatriculée GH-482-KT" - and the model rightly refused to connect them.
+    The text below is the real page, wrapped exactly as pypdf returned it.
+    """
+    page = (
+        "Contrat d'assurance automobile — Horizon Mutuelle\n"
+        "Conditions particulières — Formule Tous Risques Confort\n"
+        "Numéro de contrat : HZ-2026-448217. Le présent contrat est conclu entre la société "
+        "Horizon Mutuelle,\n"
+        "société d'assurance mutuelle dont le siège est situé 18 quai Perrache, 69002 Lyon, "
+        "ci-après « l'assureur »,\n"
+        "et Monsieur Julien Moreau, demeurant 7 rue des Tanneurs, 69007 Lyon, ci-après "
+        "« l'assuré ».\n"
+        "Article 1 — Véhicule assuré\n"
+        "Le véhicule assuré est une Peugeot 308 SW, motorisation hybride rechargeable, mise en "
+        "circulation le 12\n"
+        "mars 2023 et immatriculée GH-482-KT. Le véhicule est garé la nuit dans un parking "
+        "souterrain fermé. Il\n"
+        "est utilisé pour les déplacements privés et le trajet domicile-travail ; tout usage "
+        "professionnel (tournées,\n"
+        "livraisons, transport de personnes à titre onéreux) est exclu.\n"
+    )
+
+    chunks = split(page)
+
+    assert any("Peugeot 308 SW" in c and "GH-482-KT" in c for c in chunks)

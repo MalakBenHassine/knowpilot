@@ -21,6 +21,7 @@ dependencies = [
     "sentence-transformers>=6.1.0",
     "sqlalchemy>=2.0.54",
     "torch>=2.14.0",
+    "tzdata>=2025.2",
 ]
 
 # The application ships as a container and is never published to an index:

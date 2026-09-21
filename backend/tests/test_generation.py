@@ -8,6 +8,8 @@ allowed to reach the user at all.
 """
 
 import logging
+import uuid
+from datetime import date
 
 import anyio
 import pytest
@@ -27,10 +29,11 @@ from app.rag.generation import (
 from tests.fakes import SpyChatModel, answer_chain, passage, passages, spy
 
 QUESTION = "Quelles technologies DevOps sont mentionnees ?"
+TODAY = date(2026, 9, 21)
 
 
 def ask(model: SpyChatModel, found: list[Document], question: str = QUESTION) -> Answer:
-    return anyio.run(lambda: answer_question(question, found, answer_chain(model)))
+    return anyio.run(lambda: answer_question(question, found, answer_chain(model), today=TODAY))
 
 
 # --- Guard 1: nothing close enough --------------------------------------
@@ -266,7 +269,7 @@ def test_a_hostile_instruction_stays_inside_the_data_block() -> None:
 def test_the_template_declares_exactly_the_expected_variables() -> None:
     # A typo in a placeholder would otherwise surface as a KeyError on the
     # first real question, in production.
-    assert set(ANSWER_PROMPT.input_variables) == {"passages", "question"}
+    assert set(ANSWER_PROMPT.input_variables) == {"passages", "question", "today"}
 
 
 def test_passages_are_numbered_from_one() -> None:
@@ -301,7 +304,10 @@ def test_an_absurdly_long_question_is_refused_before_it_costs_tokens() -> None:
 def stream(reply: str, found: list[Document] | None = None) -> list[Delta | Final]:
     async def collect() -> list[Delta | Final]:
         chain = answer_chain(spy(reply))
-        return [event async for event in stream_answer(QUESTION, found or passages(2), chain)]
+        return [
+            event
+            async for event in stream_answer(QUESTION, found or passages(2), chain, today=TODAY)
+        ]
 
     return anyio.run(collect)
 
@@ -389,9 +395,69 @@ def test_without_passages_the_stream_never_calls_the_model() -> None:
     model = spy()
 
     async def collect() -> list[Delta | Final]:
-        return [event async for event in stream_answer(QUESTION, [], answer_chain(model))]
+        return [
+            event async for event in stream_answer(QUESTION, [], answer_chain(model), today=TODAY)
+        ]
 
     events = anyio.run(collect)
 
     assert events == [Final(Answer(text="", citations=[], is_grounded=False))]
     assert model.calls == 0
+
+
+# --- What the model is told, beyond the passages ------------------------------
+
+
+def test_the_model_is_told_the_date() -> None:
+    """Found by a manual test: an amendment "from 1 October 2026" was answered
+    as already in force on 21 September. The model cannot know the date."""
+    model = spy()
+
+    ask(model, passages(1))
+
+    _, human = model.last()
+    assert "Today's date: 2026-09-21" in human
+
+
+def test_passages_of_one_document_share_a_letter() -> None:
+    lease, insurance = uuid.uuid4(), uuid.uuid4()
+    text = format_passages(
+        [
+            passage("Loyer 890 euros.", document_id=lease),
+            passage("Cotisation 57 euros.", document_id=insurance),
+            passage("Provision 135 euros.", document_id=lease),
+        ]
+    )
+
+    # Found by a manual test: with a lease and an insurance contract, "how much
+    # do I pay each month?" was answered from the lease alone - the model could
+    # not tell that the passages came from two documents.
+    assert "[1] (document A) Loyer" in text
+    assert "[2] (document B) Cotisation" in text
+    assert "[3] (document A) Provision" in text
+
+
+def test_the_letter_reveals_nothing_about_the_file() -> None:
+    model = spy()
+
+    ask(model, [passage("Texte.", filename="salaires-confidentiels.pdf", page_number=12)])
+
+    _, human = model.last()
+    # A letter, not a name: an invented citation stays inexpressible.
+    assert "(document A)" in human
+    assert "salaires" not in human
+    assert "12" not in human.replace("2026-09-21", "")
+
+
+def test_the_model_is_forbidden_to_generalise() -> None:
+    """Found by a manual test: asked about a broken wing mirror, the model
+    applied the windscreen deductible - "a mirror is glass" - which no passage
+    says. The citation was valid; the claim was not in the document."""
+    system, _ = SpyChatModel.last(_asked(spy()))
+
+    assert "Never extend a rule to a case the passages do not name" in system
+
+
+def _asked(model: SpyChatModel) -> SpyChatModel:
+    ask(model, passages(1))
+    return model
