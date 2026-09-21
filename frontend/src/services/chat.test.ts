@@ -31,6 +31,7 @@ describe('toAnswerPayload (wire format -> domain)', () => {
       sources: [
         {
           id: '0b7d3f3e-1c5a-4a9e-9f2e-3a7c1d2e5f80#1',
+          number: 1,
           documentId: '0b7d3f3e-1c5a-4a9e-9f2e-3a7c1d2e5f80',
           filename: 'contrat.pdf',
           page: 7,

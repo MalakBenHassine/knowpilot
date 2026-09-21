@@ -16,6 +16,14 @@ export function SourceCard({ source, onOpen }: { source: Source; onOpen?: (sourc
         className="flex w-full flex-col items-start gap-2 text-left"
       >
         <div className="flex w-full items-center gap-2">
+          {typeof source.number === 'number' ? (
+            <span
+              className="shrink-0 rounded-sm bg-accent-soft px-1.5 text-caption font-semibold text-accent"
+              aria-label={`Source ${source.number}`}
+            >
+              [{source.number}]
+            </span>
+          ) : null}
           <FileText size={14} className="shrink-0 text-ink-subtle" />
           <span className="min-w-0 truncate text-caption font-medium text-ink">
             {source.filename}

@@ -21,6 +21,7 @@ export function toSource(raw: unknown): Source {
     // within one answer, and asking the backend for a field only React needs
     // would be one more thing to keep in sync for no benefit.
     id: `${documentId}#${number}`,
+    number,
     documentId,
     filename: asString(value.filename, 'citation.filename'),
     page: asNumber(value.page_number, 'citation.page_number'),

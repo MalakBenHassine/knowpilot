@@ -45,6 +45,31 @@ describe('AssistantMessage', () => {
     expect(container.querySelector('[aria-busy="true"]')).not.toBeNull()
   })
 
+  it('labels each source with the number the answer cites it by', () => {
+    render(
+      <AssistantMessage
+        turn={turnWith({
+          phase: 'answered',
+          answer: 'Franchise de 90 euros [2].',
+          sources: [
+            {
+              id: 'doc#2',
+              number: 2,
+              documentId: 'doc',
+              filename: 'contrat.pdf',
+              page: 2,
+              snippet: '90 euros si remplacement.',
+            },
+          ],
+        })}
+        onRetry={vi.fn()}
+      />,
+    )
+
+    // [2] in the text, [2] on the card: no matching by guesswork.
+    expect(screen.getByLabelText('Source 2')).toHaveTextContent('[2]')
+  })
+
   it('renders the answer with its sources', () => {
     render(
       <AssistantMessage
