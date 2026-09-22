@@ -13,6 +13,7 @@ const ERROR_COPY: Record<ChatErrorKind, string> = {
   network: 'We could not reach the server. Check your connection and try again.',
   timeout: 'The answer took too long to arrive. Please try again.',
   rate_limited: 'Too many questions in a short time. Wait a moment and try again.',
+  busy: 'The assistant is handling too many requests right now. Try again in a moment.',
   server: 'Something went wrong on our side. Please try again.',
 }
 
@@ -32,6 +33,10 @@ function quoted(subjects: string[]): string {
 function errorCopy(kind: ChatErrorKind, retryAfterSeconds?: number): string {
   if (kind === 'rate_limited' && retryAfterSeconds !== undefined) {
     return `You have used your questions for now. Try again in ${formatWait(retryAfterSeconds)}.`
+  }
+  if (kind === 'busy' && retryAfterSeconds !== undefined) {
+    // Not "your" anything: the user did nothing wrong, and was not charged.
+    return `The assistant is handling too many requests right now. Try again in ${formatWait(retryAfterSeconds)}. This question was not counted.`
   }
   return ERROR_COPY[kind]
 }
@@ -132,7 +137,7 @@ export function AssistantMessage({
           // teaches people to ignore both.
           <div
             className={
-              turn.state.kind === 'rate_limited'
+              turn.state.kind === 'rate_limited' || turn.state.kind === 'busy'
                 ? 'rounded-lg border border-line bg-surface-sunken p-4'
                 : 'rounded-lg border border-transparent bg-danger-soft p-4'
             }
@@ -143,6 +148,11 @@ export function AssistantMessage({
                 <>
                   <Clock size={16} className="text-ink-muted" />
                   You have reached your limit.
+                </>
+              ) : turn.state.kind === 'busy' ? (
+                <>
+                  <Clock size={16} className="text-ink-muted" />
+                  The assistant is busy.
                 </>
               ) : (
                 <>

@@ -24,7 +24,13 @@ export type AnswerPayload =
 export type LoadingStage = 'retrieving' | 'generating'
 
 /** Why a request failed. Used to pick the user-facing message. */
-export type ChatErrorKind = 'network' | 'timeout' | 'rate_limited' | 'server'
+/**
+ * `rate_limited` is the USER's budget (429). `busy` is the SERVICE saturated
+ * upstream - the language model's own per-minute or daily limit (503 with
+ * Retry-After). Telling someone who asked five questions that they "used
+ * their questions" was a bug found by a manual test.
+ */
+export type ChatErrorKind = 'network' | 'timeout' | 'rate_limited' | 'busy' | 'server'
 
 /**
  * Client-side state of one assistant turn.

@@ -180,4 +180,19 @@ describe('AssistantMessage', () => {
     rerender(<AssistantMessage turn={turnWith({ phase: 'error', kind: 'rate_limited' })} onRetry={vi.fn()} />)
     expect(screen.getByText(/too many questions/i)).toBeInTheDocument()
   })
+
+  it('never tells a user they used their questions when the service is busy', () => {
+    render(
+      <AssistantMessage
+        turn={turnWith({ phase: 'error', kind: 'busy', retryAfterSeconds: 120 })}
+        onRetry={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('The assistant is busy.')).toBeInTheDocument()
+    expect(screen.getByText(/not counted/i)).toBeInTheDocument()
+    expect(screen.queryByText(/your limit|used your questions/i)).toBeNull()
+    // Waiting fixes it, so the question can be asked again from here.
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  })
 })

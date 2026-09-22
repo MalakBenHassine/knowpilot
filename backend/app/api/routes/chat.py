@@ -153,13 +153,19 @@ async def ask(
             unnamed=evidence.unnamed,
         )
     except QuotaExhaustedError as exc:
-        # Their budget, not ours: our counter was wrong about the real one, so
-        # the user keeps the question they could not use.
+        # The PROVIDER's limit, not the user's: our counter said yes, Groq said
+        # "not now". So the user keeps the question they could not use.
+        #
+        # 503 + Retry-After, not 429. A 429 tells the client IT sent too much,
+        # and the interface said exactly that - "you have used your questions"
+        # - to a user who had asked five of twenty. Found by a manual test.
+        # 503 with Retry-After is HTTP for "the service is overloaded, come
+        # back in N seconds" (RFC 9110), which is what happened.
         await quota.refund(owner_id=owner_id)
         raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "The service has used its questions for today",
-            headers={"Retry-After": str(int(exc.retry_after))},
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The assistant is busy, try again shortly",
+            headers={"Retry-After": str(max(1, int(exc.retry_after)))},
         ) from exc
     except LanguageModelError as exc:
         # An outage of ours must not cost the user part of their day.
@@ -205,7 +211,9 @@ async def ask_streaming(
         token   {"text": "..."}           verified text to append (0..n times)
         done    ChatResponse              the authoritative answer; replaces
                                           whatever was shown
-        error   {"kind", "retry_after"?}  instead of `done`, on a failure
+        error   {"kind", "retry_after"?}  instead of `done`, on a failure;
+                                          kind is "busy" (provider limit, with
+                                          retry_after) or "server"
     """
     owner_id = session.sub
     evidence = await _prepare(payload.question, owner_id, retrievers, quota, check)
@@ -231,8 +239,10 @@ async def ask_streaming(
                     response = ChatResponse.of(event.answer)
                     yield _event("done", response.model_dump(mode="json"))
         except QuotaExhaustedError as exc:
+            # "busy", not "rate_limited": the service is saturated, the user
+            # is not over their budget (see the JSON route above).
             await quota.refund(owner_id=owner_id)
-            yield _event("error", {"kind": "rate_limited", "retry_after": int(exc.retry_after)})
+            yield _event("error", {"kind": "busy", "retry_after": max(1, int(exc.retry_after))})
         except LanguageModelError as exc:
             await quota.refund(owner_id=owner_id)
             logger.warning("streamed generation failed: %s", type(exc).__name__)

@@ -81,6 +81,28 @@ describe('streamQuestion', () => {
     await expect(failure).rejects.toMatchObject({ kind: 'rate_limited', retryAfterSeconds: 1800 })
   })
 
+  it('tells a saturated service apart from a spent budget', async () => {
+    serve(event('stage', { stage: 'generating' }) + event('error', { kind: 'busy', retry_after: 120 }))
+
+    await expect(streamQuestion('Quels outils ?', handlers())).rejects.toMatchObject({
+      kind: 'busy',
+      retryAfterSeconds: 120,
+    })
+  })
+
+  it('maps a 503 that says when to come back to busy, and a bare 503 to server', async () => {
+    serve('', { status: 503, headers: { 'Retry-After': '120' } })
+    await expect(streamQuestion('Quels outils ?', handlers())).rejects.toMatchObject({
+      kind: 'busy',
+      retryAfterSeconds: 120,
+    })
+
+    serve('', { status: 503 })
+    await expect(streamQuestion('Quels outils ?', handlers())).rejects.toMatchObject({
+      kind: 'server',
+    })
+  })
+
   it('treats a stream that ends without a verdict as interrupted', async () => {
     // Whatever was shown is not an answer until the server says so.
     serve(event('token', { text: 'Docker [1].' }))

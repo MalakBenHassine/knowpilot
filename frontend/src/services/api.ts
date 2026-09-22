@@ -15,7 +15,7 @@ export class ApiError extends Error {
   readonly kind: ChatErrorKind
   /**
    * Seconds until the request is worth repeating, when the server said so.
-   * Only a 429 carries it, and only because the backend sets Retry-After: a
+   * A 429 or a busy 503 carries it, because the backend sets Retry-After: a
    * refusal that does not say when to come back invites an immediate retry,
    * which is refused again.
    */
@@ -30,8 +30,10 @@ export class ApiError extends Error {
   }
 }
 
-function kindFromStatus(status: number): ChatErrorKind {
+function kindFromStatus(status: number, retryAfterSeconds?: number): ChatErrorKind {
   if (status === 429) return 'rate_limited'
+  // A 503 that says when to come back is an overload, not a malfunction.
+  if (status === 503 && retryAfterSeconds !== undefined) return 'busy'
   return 'server'
 }
 
@@ -117,11 +119,12 @@ async function send(path: string, options: RequestOptions): Promise<Response> {
 
   if (!response.ok) {
     // Backend details are never surfaced to the user, only the status class.
+    const retryAfter = retryAfterFrom(response)
     throw new ApiError(
       `Request failed (${response.status})`,
       response.status,
-      kindFromStatus(response.status),
-      retryAfterFrom(response),
+      kindFromStatus(response.status, retryAfter),
+      retryAfter,
     )
   }
 

@@ -81,7 +81,9 @@ export interface StreamHandlers {
 
 function streamErrorOf(raw: unknown): ApiError {
   const value = asRecord(raw, 'error')
-  const kind = value.kind === 'rate_limited' ? 'rate_limited' : 'server'
+  // Anything unknown is a server error: a new kind must not be shown with
+  // the copy of an old one.
+  const kind = value.kind === 'rate_limited' || value.kind === 'busy' ? value.kind : 'server'
   const retryAfter =
     typeof value.retry_after === 'number' && value.retry_after > 0 ? value.retry_after : undefined
   return new ApiError('The answer could not be completed.', 200, kind, retryAfter)

@@ -310,7 +310,12 @@ async def test_a_provider_outage_gives_the_question_back(
 async def test_the_provider_own_limit_is_refunded_too(
     client: AsyncClient, store: FakeVectorStore, redis: FakeRedis
 ) -> None:
-    """Our counter was wrong about the real budget; the user is not punished."""
+    """Our counter was wrong about the real budget; the user is not punished.
+
+    And not told they used their questions: found by a manual test, where a
+    user who had asked five of twenty read "you have used your questions".
+    The SERVICE is saturated - 503 with a delay, not 429.
+    """
     store.hits = [(passage(CONGES), 0.2)]
     app.dependency_overrides[get_answer_chain] = lambda: FailingChain(
         QuotaExhaustedError(retry_after=1800)
@@ -318,7 +323,7 @@ async def test_the_provider_own_limit_is_refunded_too(
 
     response = await client.post("/api/chat", **ask())
 
-    assert response.status_code == 429
+    assert response.status_code == 503
     assert response.headers["retry-after"] == "1800"
     assert user_key(ALICE) not in redis.values
 
@@ -469,7 +474,7 @@ async def test_the_provider_limit_mid_stream_says_when_to_come_back(
 
     events = events_of((await client.post("/api/chat/stream", **ask())).text)
 
-    assert events[-1] == ("error", {"kind": "rate_limited", "retry_after": 1800})
+    assert events[-1] == ("error", {"kind": "busy", "retry_after": 1800})
     assert user_key(ALICE) not in redis.values
 
 

@@ -199,8 +199,12 @@ will never become readable; a full disk might have been emptied.
 - Body: `{ "question": string }` and nothing else
 - `200` with `{ answer, citations, is_grounded, not_in_documents }`
 - `422` when the question is blank or longer than 1000 characters
-- `429` with a `Retry-After` header in seconds, when a budget is spent
-- `503` when answering is disabled or the provider failed
+- `429` with a `Retry-After` header in seconds, when YOUR budget (or the
+  service daily budget) is spent
+- `503` with a `Retry-After` header when the language model provider is
+  saturated (its per-minute or daily limit): the question is refunded, and
+  the client says "busy", never "you have used your questions"
+- `503` without `Retry-After` when answering is disabled or the provider failed
 
 The body carries a question and only a question. There is no owner field,
 no document filter and no model name: the owner comes from the session
@@ -251,7 +255,7 @@ Server-Sent Events (`Content-Type: text/event-stream`) while it is generated.
 | `stage` | `{"stage": "generating"}` | retrieval is over, the model is called |
 | `token` | `{"text": "..."}` | verified text to APPEND to what is shown |
 | `done` | same body as `POST /api/chat` | the authoritative answer; REPLACES what was shown |
-| `error` | `{"kind": "server"}` or `{"kind": "rate_limited", "retry_after": 1800}` | sent instead of `done` when the provider fails mid-way |
+| `error` | `{"kind": "server"}` or `{"kind": "busy", "retry_after": 120}` | sent instead of `done` when the provider fails or is saturated mid-way |
 
 Nothing the guards would reject is ever sent. The server holds the text back
 until the first valid citation `[n]` has been generated: from that point the
