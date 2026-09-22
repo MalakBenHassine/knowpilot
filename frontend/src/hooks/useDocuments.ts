@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { formatWait } from '../lib/format'
 import { ApiError } from '../services/api'
 import * as documentsService from '../services/documents'
 import type { StoredDocument } from '../types/document'
@@ -13,7 +14,7 @@ const POLL_INTERVAL_MS = 1500
  * leak internals. Telling someone to "try again" when their file is simply too
  * large only wastes their time.
  */
-function uploadErrorMessage(file: File, error: unknown): string {
+export function uploadErrorMessage(file: File, error: unknown): string {
   if (error instanceof ApiError) {
     switch (error.status) {
       case 409:
@@ -26,6 +27,12 @@ function uploadErrorMessage(file: File, error: unknown): string {
         return `${file.name} is empty.`
       case 503:
         return 'Indexing is temporarily unavailable. Please try again in a moment.'
+      case 429:
+        // Without this case the generic "please try again" invited exactly
+        // the immediate retry the limit exists to stop.
+        return error.retryAfterSeconds === undefined
+          ? `Too many uploads in a short time. Wait a moment before sending ${file.name}.`
+          : `Too many uploads in a short time. Try ${file.name} again in ${formatWait(error.retryAfterSeconds)}.`
     }
   }
   return `${file.name} could not be uploaded. Please try again.`

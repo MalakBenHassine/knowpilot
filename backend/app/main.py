@@ -14,6 +14,7 @@ from app.core.logging import configure_logging
 from app.core.oidc import OidcClient
 from app.core.queue import ArqJobQueue, create_queue
 from app.core.quota import QuotaTracker
+from app.core.rate_limit import RateLimiter
 from app.core.session import SessionStore
 from app.core.storage import FileStorage
 from app.core.tracing import ensure_tracing_is_deliberate
@@ -103,6 +104,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Counters live in Redis, so every worker and every replica spends from
     # the same daily budget. Four processes with four dictionaries would
     # allow four times the quota, which is the failure this prevents.
+    # Same Redis, same reason: a per-process counter would allow one limit
+    # per worker.
+    app.state.rate_limiter = RateLimiter(
+        redis,
+        limits={
+            "chat": settings.chat_requests_per_minute,
+            "upload": settings.upload_requests_per_minute,
+        },
+    )
     app.state.quota = QuotaTracker(
         redis,
         per_user=settings.daily_questions_per_user,

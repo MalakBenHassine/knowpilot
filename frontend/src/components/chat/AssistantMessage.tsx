@@ -32,7 +32,7 @@ function quoted(subjects: string[]): string {
 
 function errorCopy(kind: ChatErrorKind, retryAfterSeconds?: number): string {
   if (kind === 'rate_limited' && retryAfterSeconds !== undefined) {
-    return `You have used your questions for now. Try again in ${formatWait(retryAfterSeconds)}.`
+    return `You have reached a limit on questions. Try again in ${formatWait(retryAfterSeconds)}.`
   }
   if (kind === 'busy' && retryAfterSeconds !== undefined) {
     // Not "your" anything: the user did nothing wrong, and was not charged.

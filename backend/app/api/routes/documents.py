@@ -12,7 +12,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Response, UploadFile, status
 from sqlalchemy.exc import IntegrityError
 
-from app.api.deps import CsrfProtected, CurrentSession, Db, Queue, Storage
+from app.api.deps import CsrfProtected, CurrentSession, Db, Queue, Storage, UploadRateLimited
 from app.core.storage import (
     READ_CHUNK_BYTES,
     SNIFF_BYTES,
@@ -58,7 +58,7 @@ async def _store_upload(
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Upload a document")
 async def upload_document(
-    session: CsrfProtected,
+    session: UploadRateLimited,
     database: Db,
     storage: Storage,
     queue: Queue,
@@ -187,7 +187,7 @@ async def delete_document(
     summary="Retry a failed ingestion",
 )
 async def retry_document(
-    session: CsrfProtected,
+    session: UploadRateLimited,
     database: Db,
     queue: Queue,
     document_id: uuid.UUID,

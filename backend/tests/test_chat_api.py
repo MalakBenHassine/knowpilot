@@ -25,11 +25,13 @@ from app.api.deps import (
     current_session,
     get_answer_chain,
     get_quota_tracker,
+    get_rate_limiter,
     get_retrievers,
     get_subject_check,
     require_csrf,
 )
 from app.core.quota import QuotaTracker
+from app.core.rate_limit import RateLimiter
 from app.main import app
 from app.rag.generation import REFUSAL
 from app.rag.llm import LanguageModelUnavailableError, QuotaExhaustedError
@@ -90,6 +92,14 @@ def quota(redis: FakeRedis) -> QuotaTracker:
 
 
 @pytest.fixture
+def limiter() -> RateLimiter:
+    # Its own fake Redis: the quota tests read `redis.values` to prove who was
+    # charged, and rate counters there would only be noise. Generous, so only
+    # the tests about the limit ever reach it.
+    return RateLimiter(FakeRedis(), limits={"chat": 100, "upload": 100})  # type: ignore[arg-type]
+
+
+@pytest.fixture
 def check() -> FakeSubjectCheck:
     # No subject by default: most questions are about a topic, not a thing.
     return FakeSubjectCheck()
@@ -97,7 +107,11 @@ def check() -> FakeSubjectCheck:
 
 @pytest.fixture
 async def client(
-    model: SpyChatModel, store: FakeVectorStore, quota: QuotaTracker, check: FakeSubjectCheck
+    model: SpyChatModel,
+    store: FakeVectorStore,
+    quota: QuotaTracker,
+    check: FakeSubjectCheck,
+    limiter: RateLimiter,
 ) -> AsyncIterator[AsyncClient]:
     """The real application with its edges replaced, and nothing else."""
     app.dependency_overrides[current_session] = lambda: signed_in_as(ALICE)
@@ -110,6 +124,7 @@ async def client(
     app.dependency_overrides[get_answer_chain] = lambda: answer_chain(model)
     app.dependency_overrides[get_quota_tracker] = lambda: quota
     app.dependency_overrides[get_subject_check] = lambda: check
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as http:
@@ -577,3 +592,54 @@ async def test_a_refusal_carries_no_notice(
 
     assert body["is_grounded"] is False
     assert body["not_in_documents"] == []
+
+
+# --- ⏱ Per-minute limit -------------------------------------------------------
+
+
+def tight(limit: int = 2) -> RateLimiter:
+    return RateLimiter(FakeRedis(), limits={"chat": limit, "upload": limit})  # type: ignore[arg-type]
+
+
+async def test_a_flood_of_questions_is_refused_before_any_work(
+    client: AsyncClient, store: FakeVectorStore, redis: FakeRedis
+) -> None:
+    """The point of the limit: a refused question costs no embedding, no
+    search and no quota - it is stopped before the handler runs."""
+    limiter = tight(2)
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
+    store.hits = [(passage(CONGES), 0.2)]
+    for _ in range(2):
+        assert (await client.post("/api/chat", **ask())).status_code == 200
+    searches, charged = len(store.queries), dict(redis.values)
+
+    response = await client.post("/api/chat", **ask())
+
+    assert response.status_code == 429
+    assert 1 <= int(response.headers["retry-after"]) <= 60
+    assert len(store.queries) == searches
+    assert redis.values == charged
+
+
+async def test_the_stream_shares_the_same_limit(client: AsyncClient) -> None:
+    # Two routes, one budget: alternating between them must not double it.
+    limiter = tight(1)
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
+    await client.post("/api/chat", **ask())
+
+    response = await client.post("/api/chat/stream", **ask())
+
+    # Refused with a status, before the stream opens.
+    assert response.status_code == 429
+    assert "retry-after" in response.headers
+
+
+async def test_one_users_flood_does_not_limit_another(client: AsyncClient) -> None:
+    limiter = tight(1)
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
+    await client.post("/api/chat", **ask())
+    assert (await client.post("/api/chat", **ask())).status_code == 429
+
+    app.dependency_overrides[require_csrf] = lambda: signed_in_as(BOB)
+
+    assert (await client.post("/api/chat", **ask())).status_code == 200

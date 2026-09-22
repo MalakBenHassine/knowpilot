@@ -22,13 +22,16 @@ from app.api.deps import (
     db_session,
     get_file_storage,
     get_job_queue,
+    get_rate_limiter,
     require_csrf,
 )
+from app.core.rate_limit import RateLimiter
 from app.core.session import SessionData
 from app.core.storage import FileStorage
 from app.db.documents import create_document, mark_failed, mark_ready
 from app.main import app
 from tests.conftest import requires_database
+from tests.test_quota import FakeRedis
 
 ALICE = "alice-sub-0001"
 BOB = "bob-sub-0002"
@@ -93,6 +96,8 @@ async def client(
     app.dependency_overrides[require_csrf] = lambda: signed_in_as(ALICE)
     app.dependency_overrides[get_file_storage] = lambda: FileStorage(tmp_path)
     app.dependency_overrides[get_job_queue] = lambda: indexing
+    limiter = RateLimiter(FakeRedis(), limits={"chat": 100, "upload": 100})  # type: ignore[arg-type]
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -342,3 +347,23 @@ async def test_retrying_the_document_of_another_user_is_a_404(
     response = await client.post(f"/api/documents/{document_id}/retry")
 
     assert response.status_code == 404
+
+
+# --- ⏱ Per-minute limit -------------------------------------------------------
+
+
+async def test_a_flood_of_uploads_is_refused_before_any_work(
+    client: AsyncClient, indexing: FakeQueue
+) -> None:
+    """Each upload is disk and a queued job of parsing and embedding."""
+    limiter = RateLimiter(FakeRedis(), limits={"chat": 100, "upload": 1})  # type: ignore[arg-type]
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
+    assert (await client.post("/api/documents", **upload(b"premier fichier"))).status_code == 201
+    queued = len(indexing.jobs)
+
+    response = await client.post("/api/documents", **upload(b"second fichier", "b.txt"))
+
+    assert response.status_code == 429
+    assert "retry-after" in response.headers
+    # Refused before the handler ran: nothing stored, nothing queued.
+    assert len(indexing.jobs) == queued

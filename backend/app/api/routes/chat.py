@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 from langchain_core.documents import Document
 
-from app.api.deps import AnswerChain, CsrfProtected, Quota, Retrievers, SubjectChecker
+from app.api.deps import AnswerChain, ChatRateLimited, Quota, Retrievers, SubjectChecker
 from app.core.clock import today
 from app.core.quota import QuotaExceededError, QuotaTracker
 from app.rag.generation import Delta, answer_question, stream_answer
@@ -126,8 +126,9 @@ async def ask(
     payload: ChatRequest,
     # CSRF rather than the plain session: this is a POST that spends a budget
     # and money. A third-party page must not be able to trigger it with the
-    # cookie the browser sends on its own.
-    session: CsrfProtected,
+    # cookie the browser sends on its own. Then the per-minute limit, before
+    # the retrieval it protects.
+    session: ChatRateLimited,
     retrievers: Retrievers,
     chain: AnswerChain,
     quota: Quota,
@@ -193,7 +194,7 @@ def _event(name: str, data: dict[str, Any]) -> str:
 @router.post("/stream", summary="Ask a question; receive the answer as it is generated")
 async def ask_streaming(
     payload: ChatRequest,
-    session: CsrfProtected,
+    session: ChatRateLimited,
     retrievers: Retrievers,
     chain: AnswerChain,
     quota: Quota,

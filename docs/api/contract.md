@@ -162,6 +162,7 @@ proxy between the browser and here.
 | `409` | The same content was already uploaded **by this user** | "Already uploaded" |
 | `413` | Over 20 MB | "Too large, 20 MB maximum" |
 | `415` | Not a PDF and not UTF-8 text | "Only PDF and text files" |
+| `429` | More than `KP_UPLOAD_REQUESTS_PER_MINUTE` uploads and retries this minute; `Retry-After` in seconds | "Too many uploads, try again in ..." |
 | `503` | The embedding model is not loaded | "Try again in a moment" |
 
 The type is detected **from the first bytes of the content**, never from the
@@ -189,6 +190,7 @@ never leaves a row pointing at bytes that are gone.
 - `202` with the document back in `processing`
 - `404` when it does not exist or is not yours
 - `409` when the document is not `failed`, or failed with `retryable: false`
+- `429` with `Retry-After`: shares the per-minute upload limit
 
 Only the backend decides whether a second attempt can succeed. A scanned page
 will never become readable; a full disk might have been emptied.
@@ -200,7 +202,9 @@ will never become readable; a full disk might have been emptied.
 - `200` with `{ answer, citations, is_grounded, not_in_documents }`
 - `422` when the question is blank or longer than 1000 characters
 - `429` with a `Retry-After` header in seconds, when YOUR budget (or the
-  service daily budget) is spent
+  service daily budget) is spent, or after more than
+  `KP_CHAT_REQUESTS_PER_MINUTE` requests this minute - counted before any
+  retrieval, and shared with `/api/chat/stream`
 - `503` with a `Retry-After` header when the language model provider is
   saturated (its per-minute or daily limit): the question is refunded, and
   the client says "busy", never "you have used your questions"

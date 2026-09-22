@@ -155,6 +155,14 @@ class Settings(BaseSettings):
     daily_questions_per_user: int = Field(default=20, gt=0)
     daily_questions_per_service: int = Field(default=80, gt=0)
 
+    # --- Per-minute request limits (app/core/rate_limit.py) ---
+    # The daily budget counts what reaches the model; these count every
+    # request, before any work - retrieval and uploads cost CPU and disk even
+    # when they cost no tokens. Ten a minute is far above a person reading
+    # answers and far below a script.
+    chat_requests_per_minute: int = Field(default=10, gt=0)
+    upload_requests_per_minute: int = Field(default=10, gt=0)
+
     @model_validator(mode="after")
     def _budgets_are_coherent(self) -> "Settings":
         """A per-user limit above the service limit can never be reached.

@@ -28,6 +28,9 @@ export function formatKind(mimeType: string): string {
 export function formatWait(seconds: number): string {
   if (seconds < 60) return 'a moment'
   const minutes = Math.ceil(seconds / 60)
+  // "1 minutes" is what a wait of exactly 60 seconds - a full rate-limit
+  // window - used to read.
+  if (minutes === 1) return 'a minute'
   if (minutes < 60) return `${minutes} minutes`
   const hours = Math.ceil(minutes / 60)
   return hours === 1 ? 'an hour' : `${hours} hours`

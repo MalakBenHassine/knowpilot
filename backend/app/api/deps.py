@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.queue import JobQueue
 from app.core.quota import QuotaTracker
+from app.core.rate_limit import Action, RateLimitedError, RateLimiter
 from app.core.session import SessionData, SessionStore
 from app.core.storage import FileStorage
 from app.rag.retrieval import RetrieverFactory
@@ -150,3 +151,43 @@ async def require_csrf(
 
 
 CsrfProtected = Annotated[SessionData, Depends(require_csrf)]
+
+
+def get_rate_limiter(request: Request) -> RateLimiter:
+    """Shared through Redis, so every process counts into the same window."""
+    limiter: RateLimiter = request.app.state.rate_limiter
+    return limiter
+
+
+async def _limited(action: Action, session: SessionData, limiter: RateLimiter) -> SessionData:
+    try:
+        await limiter.hit(action, owner_id=session.sub)
+    except RateLimitedError as exc:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many requests, slow down",
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+    return session
+
+
+async def limit_chat(
+    session: CsrfProtected, limiter: Annotated[RateLimiter, Depends(get_rate_limiter)]
+) -> SessionData:
+    """The session, once CSRF has passed and the user is under the limit.
+
+    Built ON TOP of the CSRF check, so a forged request is refused before it
+    can touch anyone's counter, and it runs before the handler - before the
+    retrieval whose CPU it protects.
+    """
+    return await _limited("chat", session, limiter)
+
+
+async def limit_upload(
+    session: CsrfProtected, limiter: Annotated[RateLimiter, Depends(get_rate_limiter)]
+) -> SessionData:
+    return await _limited("upload", session, limiter)
+
+
+ChatRateLimited = Annotated[SessionData, Depends(limit_chat)]
+UploadRateLimited = Annotated[SessionData, Depends(limit_upload)]

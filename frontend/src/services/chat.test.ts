@@ -115,4 +115,8 @@ describe('formatWait', () => {
   it('uses minutes below an hour', () => {
     expect(formatWait(600)).toBe('10 minutes')
   })
+
+  it('says a minute, not 1 minutes', () => {
+    expect(formatWait(60)).toBe('a minute')
+  })
 })
