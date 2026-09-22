@@ -68,6 +68,42 @@ def _fold(text: str) -> str:
     return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
+def _units(text: str) -> list[str]:
+    """Sentences, and the lines of anything too long to be one.
+
+    A table extracted from a PDF has no full stops: "Fibre Max ... 34,99 €
+    Forfait mobile ... Les frais de mise en service, d'un montant de 39 euros"
+    was ONE sentence of five hundred characters. The quote started at the
+    table and was cut before the 39 euros the answer came from - found by a
+    manual test. Its lines are its real units, so it is split on them. Prose
+    keeps its sentences: splitting a wrapped paragraph on its lines would
+    start quotes in the middle of a sentence for no reason.
+    """
+    units: list[str] = []
+    for sentence in _SENTENCE.split(text):
+        sentence = sentence.strip()
+        if len(sentence) <= SNIPPET_CHARACTERS:
+            units.append(sentence)
+        else:
+            units.extend(line.strip() for line in sentence.splitlines())
+    return [unit for unit in units if unit]
+
+
+def cited_by(answer: str, number: int) -> str:
+    """What the answer says WITH citation [number] - the claim it must prove.
+
+    An answer covering two documents cites each for different sentences.
+    Scored against the whole answer, a card quoted whatever shared the most
+    words with ANY of them: under a lease sentence cited [2][6], the card for
+    [6] showed a clause about the phone contract's commitment period - found
+    by a manual test. Falls back to the whole answer when no sentence carries
+    the marker (it came from a bracket the parser folded, for instance).
+    """
+    marker = f"[{number}]"
+    parts = [part for part in re.split(r"(?<=[.!?])\s+|\n+", answer) if marker in part]
+    return " ".join(parts) or answer
+
+
 def _snippet(text: str, answer: str) -> str:
     """Quote the part of the passage the answer actually came from.
 
@@ -85,7 +121,7 @@ def _snippet(text: str, answer: str) -> str:
     if len(text) <= SNIPPET_CHARACTERS:
         return text
 
-    sentences = [part.strip() for part in _SENTENCE.split(text) if part.strip()]
+    sentences = _units(text)
     wanted = set(_WORD.findall(_fold(_MARKER.sub(" ", answer))))
 
     start = 0
@@ -157,7 +193,7 @@ class ChatResponse(BaseModel):
                     document_id=citation.document_id,
                     filename=citation.filename,
                     page_number=citation.page_number,
-                    snippet=_snippet(citation.passage, answer.text),
+                    snippet=_snippet(citation.passage, cited_by(answer.text, citation.number)),
                 )
                 for citation in answer.citations
             ],
