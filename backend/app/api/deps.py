@@ -7,6 +7,7 @@ from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from langchain_core.runnables import Runnable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.metrics import LIMITED
 from app.core.queue import JobQueue
 from app.core.quota import QuotaTracker
 from app.core.rate_limit import Action, RateLimitedError, RateLimiter
@@ -163,6 +164,7 @@ async def _limited(action: Action, session: SessionData, limiter: RateLimiter) -
     try:
         await limiter.hit(action, owner_id=session.sub)
     except RateLimitedError as exc:
+        LIMITED.labels(limit=f"{action}_rate").inc()
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Too many requests, slow down",

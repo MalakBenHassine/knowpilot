@@ -23,6 +23,7 @@ single field, so there is no other owner in scope to take by mistake.
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -33,8 +34,15 @@ from langchain_core.documents import Document
 
 from app.api.deps import AnswerChain, ChatRateLimited, Quota, Retrievers, SubjectChecker
 from app.core.clock import today
+from app.core.metrics import (
+    GENERATION_LATENCY,
+    LIMITED,
+    NOT_IN_DOCUMENTS,
+    QUESTIONS,
+    RETRIEVED_PASSAGES,
+)
 from app.core.quota import QuotaExceededError, QuotaTracker
-from app.rag.generation import Delta, answer_question, stream_answer
+from app.rag.generation import Answer, Delta, answer_question, stream_answer
 from app.rag.llm import LanguageModelError, QuotaExhaustedError
 from app.rag.retrieval import RetrieverFactory
 from app.rag.subjects import SubjectCheck
@@ -59,12 +67,21 @@ async def _no_subjects() -> list[str]:
     return []
 
 
+def _record(route: str, answer: Answer, started: float) -> None:
+    """The metrics of one verdict, identical for both routes."""
+    QUESTIONS.labels(route=route, outcome="answered" if answer.is_grounded else "refused").inc()
+    if answer.not_in_documents:
+        NOT_IN_DOCUMENTS.inc()
+    GENERATION_LATENCY.labels(route=route).observe(time.perf_counter() - started)
+
+
 async def _prepare(
     question: str,
     owner_id: str,
     retrievers: RetrieverFactory,
     quota: QuotaTracker,
     check: SubjectCheck | None,
+    route: str,
 ) -> Evidence:
     """Steps 1 to 4, shared by both routes. No passage means: answer "not found"."""
     # 1. Retrieve BEFORE reserving the budget. The hybrid retriever embeds the
@@ -94,7 +111,9 @@ async def _prepare(
     #    error: "I do not have that information" is an answer, and the
     #    strongest guard of the feature is that the model is never called.
     #    Nothing was sent to the provider, so nothing is charged.
+    RETRIEVED_PASSAGES.observe(len(passages))
     if not passages:
+        QUESTIONS.labels(route=route, outcome="nothing_found").inc()
         return Evidence(passages)
 
     # 3. Reserve now, because the next step spends tokens that cannot be
@@ -105,6 +124,7 @@ async def _prepare(
     try:
         await quota.reserve(owner_id=owner_id)
     except QuotaExceededError as exc:
+        LIMITED.labels(limit=f"{exc.scope}_quota").inc()
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "You have used your questions for today"
@@ -138,9 +158,10 @@ async def ask(
     # changes their email, and the only identity we trust, because it came out
     # of a cookie we signed ourselves.
     owner_id = session.sub
-    evidence = await _prepare(payload.question, owner_id, retrievers, quota, check)
+    evidence = await _prepare(payload.question, owner_id, retrievers, quota, check, "json")
     if not evidence.passages:
         return UNGROUNDED_RESPONSE
+    started = time.perf_counter()
 
     # 5. Generate. Every provider failure arrives as one of our own exception
     #    types (llm.GuardedChain), so this handler never has to know that Groq
@@ -163,6 +184,7 @@ async def ask(
         # 503 with Retry-After is HTTP for "the service is overloaded, come
         # back in N seconds" (RFC 9110), which is what happened.
         await quota.refund(owner_id=owner_id)
+        QUESTIONS.labels(route="json", outcome="busy").inc()
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "The assistant is busy, try again shortly",
@@ -171,6 +193,7 @@ async def ask(
     except LanguageModelError as exc:
         # An outage of ours must not cost the user part of their day.
         await quota.refund(owner_id=owner_id)
+        QUESTIONS.labels(route="json", outcome="unavailable").inc()
         logger.warning("generation failed: %s", type(exc).__name__)
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "Answering is unavailable"
@@ -178,6 +201,7 @@ async def ask(
 
     # 6. A refusal still costs a call, so it is not refunded: the tokens were
     #    spent, and the honest answer is the product working, not failing.
+    _record("json", answer, started)
     return ChatResponse.of(answer)
 
 
@@ -217,7 +241,7 @@ async def ask_streaming(
                                           retry_after) or "server"
     """
     owner_id = session.sub
-    evidence = await _prepare(payload.question, owner_id, retrievers, quota, check)
+    evidence = await _prepare(payload.question, owner_id, retrievers, quota, check, "stream")
 
     async def events() -> AsyncIterator[str]:
         if not evidence.passages:
@@ -226,6 +250,7 @@ async def ask_streaming(
         # A real stage, reported by the server - the interface used to guess
         # it with a timer.
         yield _event("stage", {"stage": "generating"})
+        started = time.perf_counter()
         try:
             async for event in stream_answer(
                 payload.question,
@@ -237,15 +262,18 @@ async def ask_streaming(
                 if isinstance(event, Delta):
                     yield _event("token", {"text": event.text})
                 else:
+                    _record("stream", event.answer, started)
                     response = ChatResponse.of(event.answer)
                     yield _event("done", response.model_dump(mode="json"))
         except QuotaExhaustedError as exc:
             # "busy", not "rate_limited": the service is saturated, the user
             # is not over their budget (see the JSON route above).
             await quota.refund(owner_id=owner_id)
+            QUESTIONS.labels(route="stream", outcome="busy").inc()
             yield _event("error", {"kind": "busy", "retry_after": max(1, int(exc.retry_after))})
         except LanguageModelError as exc:
             await quota.refund(owner_id=owner_id)
+            QUESTIONS.labels(route="stream", outcome="unavailable").inc()
             logger.warning("streamed generation failed: %s", type(exc).__name__)
             yield _event("error", {"kind": "server"})
         # A client that disconnects mid-answer is NOT refunded: the tokens up

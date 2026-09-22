@@ -4,13 +4,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.api.routes import auth, chat, documents, health
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.metrics import HttpMetricsMiddleware, TokenMetrics
 from app.core.oidc import OidcClient
 from app.core.queue import ArqJobQueue, create_queue
 from app.core.quota import QuotaTracker
@@ -123,6 +125,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # client means a fresh TCP connection and a fresh TLS handshake, paid on
     # every question. Closed below, in reverse order of construction.
     http_client = httpx.AsyncClient()
+    # One handler for both models: it only increments global counters.
+    token_metrics = [TokenMetrics()]
     app.state.answer_chain = None
     app.state.subject_check = None
     if settings.generation_enabled:
@@ -130,7 +134,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # concurrent requests, so there is nothing to gain from one per call.
         app.state.answer_chain = build_answer_chain(
             ANSWER_PROMPT,
-            create_chat_model(settings.groq_api_key, settings.groq_model, http_client),
+            create_chat_model(
+                settings.groq_api_key, settings.groq_model, http_client, callbacks=token_metrics
+            ),
         )
 
         if settings.groq_check_model:
@@ -144,6 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         # A JSON list of a few names: 300 tokens leave room
                         # for the model's short reasoning and nothing else.
                         max_tokens=300,
+                        callbacks=token_metrics,
                     ),
                     Subjects,
                 ),
@@ -193,3 +200,27 @@ app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+
+# The scrape itself is not measured, and neither are the probes: an
+# orchestrator polling every few seconds would otherwise be most of the
+# traffic, and the request rate would measure the scrape interval.
+app.add_middleware(
+    HttpMetricsMiddleware,
+    excluded=frozenset({"/metrics", "/api/health/live", "/api/health/ready"}),
+)
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """The Prometheus scrape endpoint - deliberately OUTSIDE /api.
+
+    The reverse proxy forwards /api to this service and serves the SPA for
+    everything else, so /metrics is unreachable from the internet and only
+    answers on the internal network, where Prometheus runs. Usage counts are
+    not secret the way documents are, but they describe the business, and a
+    public page of them is a gift to anyone sizing an attack (ADR-0019).
+
+    A plain `def`: generating the text is CPU work on in-memory counters, and
+    FastAPI runs it in its thread pool rather than on the event loop.
+    """
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

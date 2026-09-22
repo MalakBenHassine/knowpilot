@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from prometheus_client import REGISTRY
 
 from app.api.deps import (
     current_session,
@@ -648,3 +649,68 @@ async def test_one_users_flood_does_not_limit_another(client: AsyncClient) -> No
     app.dependency_overrides[require_csrf] = lambda: signed_in_as(BOB)
 
     assert (await client.post("/api/chat", **ask())).status_code == 200
+
+
+# --- 📈 Metrics (ADR-0019) -------------------------------------------------------
+
+
+def counted(outcome: str, route: str = "json") -> float:
+    return (
+        REGISTRY.get_sample_value("knowpilot_questions_total", {"route": route, "outcome": outcome})
+        or 0.0
+    )
+
+
+async def test_each_outcome_is_counted(client: AsyncClient, store: FakeVectorStore) -> None:
+    nothing, answered = counted("nothing_found"), counted("answered")
+
+    await client.post("/api/chat", **ask())  # empty library
+    store.hits = [(passage(CONGES), 0.2)]
+    await client.post("/api/chat", **ask())
+
+    assert counted("nothing_found") - nothing == 1
+    assert counted("answered") - answered == 1
+
+
+async def test_a_refusal_and_a_busy_provider_are_counted_apart(
+    client: AsyncClient, store: FakeVectorStore
+) -> None:
+    """A rise in refusals is a quality regression; a rise in busy is capacity."""
+    store.hits = [(passage(CONGES), 0.2)]
+    refused, busy = counted("refused"), counted("busy", route="stream")
+
+    app.dependency_overrides[get_answer_chain] = lambda: answer_chain(spy(REFUSAL))
+    await client.post("/api/chat", **ask())
+    app.dependency_overrides[get_answer_chain] = lambda: FailingChain(
+        QuotaExhaustedError(retry_after=60)
+    )
+    await client.post("/api/chat/stream", **ask())
+
+    assert counted("refused") - refused == 1
+    assert counted("busy", route="stream") - busy == 1
+
+
+async def test_a_limited_request_is_counted_by_limit(client: AsyncClient) -> None:
+    limiter = tight(1)
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
+    labels = {"limit": "chat_rate"}
+    before = REGISTRY.get_sample_value("knowpilot_requests_limited_total", labels) or 0.0
+
+    await client.post("/api/chat", **ask())
+    await client.post("/api/chat", **ask())
+
+    after = REGISTRY.get_sample_value("knowpilot_requests_limited_total", labels) or 0.0
+    assert after - before == 1
+
+
+async def test_no_question_and_no_owner_ever_reach_the_metrics(
+    client: AsyncClient, store: FakeVectorStore
+) -> None:
+    """Counts leave the service; what people asked does not."""
+    store.hits = [(passage(CONGES), 0.2)]
+    await client.post("/api/chat", **ask("Quel est le salaire de Bob Martin ?"))
+
+    exported = (await client.get("/metrics")).text
+
+    assert "Bob Martin" not in exported
+    assert ALICE not in exported

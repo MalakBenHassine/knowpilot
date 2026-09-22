@@ -40,6 +40,16 @@ both sides.
 
 ---
 
+## Metrics
+
+### `GET /metrics`
+
+Prometheus text format (ADR-0019). Deliberately **outside `/api`**: the
+reverse proxy forwards `/api` only, so this answers on the internal network
+and never to a browser. No authentication, for that reason - it is scraped
+by Prometheus, not called by the client. It exports counts, durations and
+token totals; no label ever carries a user, a question or a document id.
+
 ## Health
 
 ### `GET /api/health/live`

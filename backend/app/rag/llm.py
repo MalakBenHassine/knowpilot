@@ -15,12 +15,13 @@ And every wait is bounded, because an unbounded wait is a leaked resource.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import aclosing
 from typing import Any, cast
 
 import groq
 import httpx
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
@@ -103,6 +104,7 @@ def create_chat_model(
     http_client: httpx.AsyncClient | None = None,
     *,
     max_tokens: int = MAX_OUTPUT_TOKENS,
+    callbacks: Sequence[BaseCallbackHandler] = (),
 ) -> ChatGroq:
     """Build the provider client once, at startup.
 
@@ -129,6 +131,10 @@ def create_chat_model(
         timeout=httpx.Timeout(READ_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
         max_retries=MAX_RETRIES,
         http_async_client=http_client,
+        # On the model rather than on each call: every call is seen - blocking,
+        # streamed, answering or checking - with nothing to forget at the call
+        # sites. The token metrics of ADR-0019 are one of these.
+        callbacks=list(callbacks) or None,
     )
 
 

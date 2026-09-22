@@ -15,6 +15,7 @@ dependencies = [
     "langchain-postgres>=0.0.18",
     "langchain-text-splitters>=1.1.2",
     "pgvector>=0.3.6,<0.4",
+    "prometheus-client>=0.23",
     "pydantic-settings>=2.15.0",
     "pypdf>=6.19.0",
     "redis>=6",
