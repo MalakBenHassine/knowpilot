@@ -48,5 +48,82 @@ jobs:
       - name: Typecheck
         run: uv run mypy app
 
+      # Offline: fast feedback. The database tests are skipped here and run
+      # in the job below, against a real PostgreSQL.
       - name: Tests
         run: uv run pytest
+
+  # The tests that matter most need PostgreSQL: tenant isolation through the
+  # real PGVectorStore, the keyword search, the context window, the subject
+  # check. Until this job existed they ran only on a laptop - the CI was green
+  # while never having executed them.
+  database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        # The same image as docker-compose.yml, pinned by digest like the
+        # actions above: a tag can be moved, a digest cannot.
+        image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+        env:
+          POSTGRES_USER: knowpilot
+          # Not a secret: an ephemeral container on a throwaway runner,
+          # reachable from that runner only.
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: knowpilot
+        ports:
+          - 5432:5432
+        # The job starts only once PostgreSQL accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U knowpilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KP_ENVIRONMENT: ci
+      KP_POSTGRES_HOST: localhost
+      KP_POSTGRES_PORT: "5432"
+      KP_POSTGRES_USER: knowpilot
+      KP_POSTGRES_PASSWORD: ci-only-password
+      KP_POSTGRES_DB: knowpilot
+      KP_RUN_DB_TESTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # The schema comes from the migrations, exactly as in production - never
+      # from create_all, which would test a schema nobody deploys.
+      - name: Migrate
+        run: uv run alembic upgrade head
+
+      # Every migration must be reversible: a deployment that cannot be
+      # rolled back is a deployment that cannot fail safely.
+      - name: Migrations round-trip
+        run: |
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+      # Fails when the models and the migrations disagree: a column added to
+      # a model without its migration would otherwise surface in production.
+      - name: Models match migrations
+        run: uv run alembic check
+
+      # A database test that is SKIPPED here is the original problem back in
+      # disguise: a green job that ran nothing. So a skip for want of a
+      # database fails the job. `shell: bash` turns on pipefail, so a failing
+      # pytest is not hidden by `tee`.
+      - name: Tests, with the database
+        shell: bash
+        run: |
+          uv run pytest -rs | tee pytest.log
+          if grep -q "set KP_RUN_DB_TESTS" pytest.log; then
+            echo "::error::database tests were skipped in the database job"
+            exit 1
+          fi

@@ -56,6 +56,21 @@ The API contract lives in [docs/api/contract.md](docs/api/contract.md), and the
 reasoning behind the main technical choices in
 [docs/adr/](docs/adr/README.md).
 
+## Running the tests
+
+```bash
+cd backend
+uv run pytest                          # offline: no database, no key, no network
+KP_RUN_DB_TESTS=1 uv run pytest        # also the PostgreSQL tests (docker compose up -d postgres)
+```
+
+The database tests are the ones that matter most - tenant isolation through
+the real PGVectorStore, the keyword search, the context window, the subject
+check - so they are opt-in locally and MANDATORY in CI: the `database` job of
+the backend workflow starts pgvector, applies the migrations, checks that
+every migration can be rolled back and that the models match them, then runs
+the whole suite and fails if a single database test was skipped.
+
 ## Evaluating the assistant
 
 ```bash
@@ -65,7 +80,7 @@ uv run python -m evals.run     # real embeddings, real pgvector, real GroqCloud
 
 The test suite proves the code behaves; it says nothing about whether the
 ASSISTANT behaves, because it runs against a fake model. This measures the
-thing the tests cannot: nine questions over documents written for the
+thing the tests cannot: twenty-one questions over documents written for the
 purpose, checking that it answers what it can, refuses what it cannot,
 ignores an instruction planted inside a document, and never sees another
 account.
@@ -73,8 +88,12 @@ account.
 It is an evaluation, not a test. A failure here is a conversation, not a
 broken build: the quality it measures can move without a line of code
 changing - a new model version, a tuned threshold, a differently worded
-document. For the same reason it does not run in CI: it costs about six
+document. For the same reason it does not run in CI: it costs about nineteen
 questions of a daily budget of eighty-five, and it needs a real API key.
+
+```bash
+uv run python -m evals.run a-value-read-with-its-date   # one case, to check one fix cheaply
+```
 
 It creates its own documents and deletes them afterwards, including after a
 failure.
