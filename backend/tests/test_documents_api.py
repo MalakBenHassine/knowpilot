@@ -12,6 +12,7 @@ Needs PostgreSQL:
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -106,7 +107,15 @@ async def client(
     app.dependency_overrides.clear()
 
 
-def upload(content: bytes, filename: str = "notes.txt") -> dict[str, object]:
+class Upload(TypedDict):
+    """The keyword arguments of an upload, typed: spread with ** into
+    client.post, a plain dict[str, object] tells the type checker nothing about
+    which parameter each key feeds."""
+
+    files: dict[str, tuple[str, bytes, str]]
+
+
+def upload(content: bytes, filename: str = "notes.txt") -> Upload:
     return {"files": {"file": (filename, content, "application/octet-stream")}}
 
 

@@ -66,6 +66,7 @@ dev = [
     "pytest>=9.1.1",
     "reportlab>=5.0.1",
     "ruff>=0.16.8",
+    "types-reportlab>=5.0.0.20260911",
 ]
 # PyTorch ships one wheel per accelerator, and the default index serves the
 # CUDA build: ~2.5 GB of GPU code that would never run on a CPU-only VM.

@@ -45,8 +45,10 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
 
+      # Tests and evaluation code too: a test that type-checks is a test
+      # that exercises the API it claims to, not one that only happens to run.
       - name: Typecheck
-        run: uv run mypy app
+        run: uv run mypy app tests evals
 
       # Offline: fast feedback. The database tests are skipped here and run
       # in the job below, against a real PostgreSQL.

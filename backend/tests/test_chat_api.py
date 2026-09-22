@@ -65,8 +65,13 @@ class FailingChain:
         raise self.error
 
     async def astream(self, inputs: dict[str, Any]) -> AsyncIterator[str]:
+        # An async generator that fails before its first token, like a
+        # provider refusing the request. The empty loop is what makes this a
+        # generator; a bare yield after the raise would be unreachable code.
+        tokens: tuple[str, ...] = ()
+        for token in tokens:
+            yield token
         raise self.error
-        yield ""  # unreachable: it only makes this an async generator
 
 
 @pytest.fixture

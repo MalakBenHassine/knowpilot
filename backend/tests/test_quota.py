@@ -303,4 +303,4 @@ def test_the_owner_cannot_be_passed_positionally() -> None:
     tracker, _ = build()
 
     with pytest.raises(TypeError):
-        anyio.run(lambda: tracker.reserve(ALICE))  # type: ignore[call-arg,misc]
+        anyio.run(lambda: tracker.reserve(ALICE))  # type: ignore[call-arg]
