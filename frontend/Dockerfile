@@ -72,6 +72,15 @@ RUN npm run build
 # process as root, which a static file server has no need to be.
 FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime
 
+# The base image is rebuilt on its own schedule, so its Alpine packages
+# trail the patched ones - 37 HIGH vulnerabilities at the last count, in
+# curl, expat, libcrypto and util-linux. Upgrading here brings them to
+# what Alpine publishes on the day the image is built, and the release
+# workflow scans the result, so the gate proves it worked.
+USER root
+RUN apk upgrade --no-cache
+USER nginx
+
 LABEL org.opencontainers.image.title="knowpilot-frontend" \
       org.opencontainers.image.description="KnowPilot single-page application" \
       org.opencontainers.image.licenses="MIT"
