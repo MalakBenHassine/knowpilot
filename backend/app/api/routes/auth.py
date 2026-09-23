@@ -29,6 +29,43 @@ from app.schemas.auth import CurrentUser, LogoutResponse
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# RFC 6749 4.1.2.1 and OpenID Connect Core 3.1.2.6 fix the error codes an
+# authorization server may return on the callback.
+_OIDC_ERRORS = frozenset(
+    {
+        "access_denied",
+        "account_selection_required",
+        "consent_required",
+        "interaction_required",
+        "invalid_request",
+        "invalid_request_object",
+        "invalid_request_uri",
+        "invalid_scope",
+        "login_required",
+        "registration_not_supported",
+        "request_not_supported",
+        "request_uri_not_supported",
+        "server_error",
+        "temporarily_unavailable",
+        "unauthorized_client",
+        "unsupported_response_type",
+    }
+)
+
+
+def _reported_error(error: str | None) -> str:
+    """What the log may say about the `error` query parameter.
+
+    That parameter comes straight from the URL, so anyone can choose it.
+    Written to the log as it arrives, a newline inside it forges a log line
+    that reads like ours, and a megabyte of text fills the disk (CWE-117).
+    The specifications fix the list of codes, so a value outside that list
+    tells us nothing worth the risk: only that one was sent.
+    """
+    if not error:
+        return "missing code/state"
+    return error if error in _OIDC_ERRORS else "unrecognised"
+
 
 def get_oidc(request: Request) -> OidcClient:
     client: OidcClient = request.app.state.oidc
@@ -115,7 +152,7 @@ async def callback(
 
     # The user cancelled, or Keycloak refused. Not an application error.
     if error or not code or not state:
-        logger.info("login aborted: %s", error or "missing code/state")
+        logger.info("login aborted: %s", _reported_error(error))
         return failure
 
     tx_id = request.cookies.get(LOGIN_TX_COOKIE)

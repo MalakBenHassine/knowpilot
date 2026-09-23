@@ -5,12 +5,15 @@ in-memory fake. What matters here is the SECURITY LOGIC — who gets 401, who
 gets 403, what a session exposes — not the network plumbing.
 """
 
+import logging
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.routes.auth import get_oidc
 from app.core.config import Settings
 from app.core.session import SESSION_COOKIE, SessionData, SessionStore
 from app.main import app
@@ -69,6 +72,56 @@ def client(store: SessionStore) -> TestClient:
 async def _login(store: SessionStore, client: TestClient, **overrides: Any) -> None:
     session_id = await store.create(make_session(**overrides))
     client.cookies.set(SESSION_COOKIE, session_id)
+
+
+@pytest.fixture
+def aborted(client: TestClient) -> Iterator[TestClient]:
+    """A client for the callbacks that end before Keycloak is ever called.
+
+    The route resolves its OIDC dependency before the handler runs, so one
+    has to exist. This one fails loudly if the handler ever touches it.
+    """
+    app.dependency_overrides[get_oidc] = _UnusableOidc
+    yield client
+    app.dependency_overrides.pop(get_oidc, None)
+
+
+class _UnusableOidc:
+    """FastAPI resolves every dependency before the handler runs, so this one
+    is built. Using it is what an aborted callback must never do."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError("an aborted callback must not call Keycloak")
+
+
+def test_callback_reports_a_known_oidc_error(
+    aborted: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A code from the specification is useful, so it is logged as it is."""
+    with caplog.at_level(logging.INFO):
+        response = aborted.get(
+            "/api/auth/callback", params={"error": "access_denied"}, follow_redirects=False
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("/login?error=auth")
+    assert "access_denied" in caplog.text
+
+
+def test_callback_never_writes_a_crafted_error_to_the_log(
+    aborted: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The parameter is attacker-controlled: it must not reach the log."""
+    forged = "access_denied\nINFO:app.api.routes.auth:login succeeded for admin"
+
+    with caplog.at_level(logging.INFO):
+        response = aborted.get(
+            "/api/auth/callback", params={"error": forged}, follow_redirects=False
+        )
+
+    assert response.status_code == 303
+    assert "login succeeded" not in caplog.text
+    assert "unrecognised" in caplog.text
 
 
 def test_me_without_a_session_is_401(client: TestClient) -> None:
