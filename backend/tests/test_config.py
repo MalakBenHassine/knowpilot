@@ -1,9 +1,11 @@
 """A production container must refuse to start on a development configuration.
 
-`_env_file=None`: these tests describe the settings object itself, and must
-not depend on whatever the developer's .env happens to contain.
+These tests describe the settings object itself, so they must not depend on
+where they run: `_env_file=None` silences the developer's .env, and the
+fixture below silences the process environment.
 """
 
+import os
 from typing import Any
 
 import pytest
@@ -19,6 +21,21 @@ PRODUCTION = {
     "frontend_url": "https://knowpilot.example.org",
     "redis_url": "redis://:a-real-password@redis:6379/0",
 }
+
+
+@pytest.fixture(autouse=True)
+def without_ambient_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove every KP_ variable the environment happens to carry.
+
+    pydantic-settings reads the process environment as well as the file, and
+    the CI exports KP_ENVIRONMENT and KP_POSTGRES_PASSWORD so the database
+    tests can reach PostgreSQL. Without this, these tests assert on the
+    runner's configuration instead of the code's defaults - and they did:
+    the database job was red while the same tests passed on a laptop.
+    """
+    for name in list(os.environ):
+        if name.startswith("KP_"):
+            monkeypatch.delenv(name, raising=False)
 
 
 def settings(**values: Any) -> Settings:
