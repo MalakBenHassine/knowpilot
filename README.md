@@ -183,5 +183,7 @@ of being forgotten.
 
 One VM, Docker Compose, Caddy for HTTPS: [docs/deploy.md](docs/deploy.md) is
 the full procedure, and [ADR-0020](docs/adr/0020-single-vm-compose-deployment.md)
-the reasoning. Images are built for x86 and ARM by the Release workflow and
-pulled by commit sha, so production runs exactly what CI built.
+the reasoning. Images are built for x86 and ARM by the Release workflow, which
+runs on a **version tag** and not on every commit: publishing is a decision,
+not a side effect of merging. They are pulled by commit sha, so production
+runs exactly what CI built - and their signature says so.

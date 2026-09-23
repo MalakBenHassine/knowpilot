@@ -5,10 +5,22 @@ name: Release
 # server never builds: it pulls the exact bytes this workflow produced, so what
 # runs in production is what CI built - not a rebuild that happens to share
 # the same Dockerfile.
+#
+# ON A TAG, NOT ON EVERY PUSH. Releasing on `main` published images from
+# commits whose tests had failed - the workflows run in parallel and this one
+# never waited. Tagging is the decision: `main` is tested continuously, and a
+# release says "this commit, the one I checked, is the one to ship".
+#
+#   git tag -a v0.3.0 -m "context window and subject check"
+#   git push origin v0.3.0
+#
+# Nothing forces the tag onto a green commit - a machine cannot tell an
+# accepted failure from an overlooked one. What changed is that publishing is
+# now an act with a name on it, instead of a side effect of merging.
 
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -109,7 +121,14 @@ jobs:
         image: [backend, frontend, keycloak]
         # Both architectures. A CVE can be in one architecture's packages and
         # not in the other's, and only one of them would reach the server.
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        platform: [linux/amd64, linux/arm64]
+        # The same mapping as the build job, because the artifact names
+        # come from it.
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       # For .trivyignore.yaml: the accepted vulnerabilities live in the
       # repository, reviewed like any other file.
@@ -142,6 +161,14 @@ jobs:
           echo "ref=$repository@sha256:${files[0]}" >> "$GITHUB_OUTPUT"
 
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          # The build pushes provenance and an SBOM, so a digest names an
+          # INDEX: the image for one architecture, plus attestation manifests
+          # under `unknown/unknown`. Left to choose, Trivy looks for a child
+          # matching the machine it runs on - and fails on every arm64 image
+          # scanned from an x86 runner, which is how the first run of this
+          # job ended. Saying which architecture removes the question.
+          TRIVY_PLATFORM: ${{ matrix.platform }}
         with:
           scan-type: image
           image-ref: ${{ steps.image.outputs.ref }}
@@ -186,17 +213,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tagged with the full commit sha - immutable, and the value
-      # KP_IMAGE_TAG takes on the server - and with `main`, a moving pointer
-      # for humans. Deployments use the sha: rolling back is setting the
-      # previous one.
+      # Two tags. The full commit sha is immutable and is the value
+      # KP_IMAGE_TAG takes on the server: rolling back is setting the previous
+      # one. The release name (v0.3.0) is for humans, and is what the
+      # signature identity below is bound to.
       - name: Tag the multi-platform image
         working-directory: ${{ runner.temp }}/digests
         run: |
           repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/knowpilot-${{ matrix.image }}"
           docker buildx imagetools create \
             --tag "$repository:$GITHUB_SHA" \
-            --tag "$repository:main" \
+            --tag "$repository:$GITHUB_REF_NAME" \
             $(printf "$repository@sha256:%s " *)
           docker buildx imagetools inspect "$repository:$GITHUB_SHA"
 
@@ -215,7 +242,9 @@ jobs:
           # Verified here, in the same job: a broken signing setup fails the
           # release instead of being discovered on the server, at deployment
           # time, by someone reading an error they have never seen.
-          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main"
+          # The identity carries the ref that triggered this run, so a
+          # verifier can tell a tagged release from a manual dispatch.
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
           issuer="https://token.actions.githubusercontent.com"
           cosign verify "$repository@$digest" --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" > /dev/null
           echo "signed and verified: $repository@$digest"

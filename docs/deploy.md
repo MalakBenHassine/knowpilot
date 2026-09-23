@@ -48,11 +48,21 @@ Paste the Groq key from console.groq.com/keys.
 ## 4. Images
 
 **Pulled from CI (recommended).** The Release workflow publishes the images
-for every commit on `main`. In `.env.production`:
+when a version tag is pushed - never on every commit, so nothing is published
+that was not chosen. To cut one, from a commit whose checks are green:
+
+```bash
+git tag -a v0.3.0 -m "what this release contains"
+git push origin v0.3.0
+```
+
+Each image then carries two tags: the release name and the full commit sha.
+Deployments use the sha, because it can never be moved - rolling back is
+setting the previous one. In `.env.production`:
 
 ```bash
 KP_IMAGE_REGISTRY=ghcr.io/malakbenhassine
-KP_IMAGE_TAG=<full commit sha, from the Actions tab>
+KP_IMAGE_TAG=<full commit sha, from the release run in the Actions tab>
 ```
 
 The first time, make the three `knowpilot-*` packages public on GitHub
@@ -67,11 +77,12 @@ Install cosign once, then, for each of the three images:
 ```bash
 IMAGE=ghcr.io/malakbenhassine/knowpilot-backend:<sha>
 cosign verify "$IMAGE" \
-  --certificate-identity "https://github.com/MalakBenHassine/knowpilot/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-identity "https://github.com/MalakBenHassine/knowpilot/.github/workflows/release.yml@refs/tags/v0.3.0" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 ```
 
-A failure here means the tag does not point at what the workflow produced.
+The identity must name the tag you are deploying. A failure here means the
+tag does not point at what the workflow produced.
 Stop and find out why; do not start the stack.
 
 **Or built on the server:** leave both variables unset, then:
