@@ -48,10 +48,14 @@ WORKDIR /app
 # that quietly picks a different version is not the build that was tested.
 # `--no-dev` leaves out pytest, mypy, ruff and reportlab - a test runner in a
 # production image is dead weight and extra attack surface.
+# `--no-build` refuses source distributions: installing one executes its
+# setup.py, so a compromised release could run code during the BUILD, not
+# at runtime where the container's restrictions apply. Every dependency
+# here publishes wheels, so this costs nothing.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --no-build
 
 
 # ============================================================================

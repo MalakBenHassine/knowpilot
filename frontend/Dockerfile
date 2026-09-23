@@ -30,8 +30,12 @@ COPY package.json package-lock.json ./
 # disagrees with package.json, and deletes node_modules first. `install` is
 # allowed to RESOLVE - it can quietly pick a newer version, which means the
 # image contains something nobody tested.
+#
+# `--ignore-scripts` stops every package's install hooks from running.
+# Those hooks are the shortest path from a compromised npm release to code
+# executing inside the build. Nothing here needs them.
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci
+    npm ci --ignore-scripts
 
 COPY . .
 
