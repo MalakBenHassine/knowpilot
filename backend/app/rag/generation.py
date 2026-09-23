@@ -161,8 +161,13 @@ def _normalise_citations(text: str) -> str:
 # whitespace BEFORE the label goes with it, so "**Assurance (document A)**"
 # becomes "**Assurance**" rather than "**Assurance **", which Markdown would
 # no longer render as bold. Only spaces on the same line: a line break is
-# layout, not part of the label.
-_LABEL = re.compile(r"[^\S\n]*\(\s*documents?\s+[A-Z]{1,2}(?:\s*(?:,|et|and|&)\s*[A-Z]{1,2})*\s*\)")
+# layout, not part of the label. That leading run is bounded to four
+# characters: unbounded, the search becomes quadratic - measured at
+# 2.2 s on 40 000 spaces - and no real label carries more than a
+# space or two in front of it.
+_LABEL = re.compile(
+    r"[^\S\n]{0,4}\(\s*documents?\s+[A-Z]{1,2}(?:\s*(?:,|et|and|&)\s*[A-Z]{1,2})*\s*\)"
+)
 
 # The longest label is "(documents A, B et C)": past this length, an open
 # parenthesis is something else and holding it back would only delay text.

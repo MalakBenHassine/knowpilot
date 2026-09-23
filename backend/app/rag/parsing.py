@@ -93,7 +93,6 @@ class ParsedDocument:
 # halves would otherwise become two meaningless tokens.
 _HYPHENATED_LINEBREAK = re.compile(r"(\w)-[ \t]*\n[ \t]*(\w)")
 _MULTIPLE_SPACES = re.compile(r"[ \t]{2,}")
-_SPACE_AROUND_NEWLINE = re.compile(r"[ \t]*\n[ \t]*")
 # Three or more blank lines carry no more meaning than one paragraph break.
 _EXTRA_NEWLINES = re.compile(r"\n{3,}")
 
@@ -108,7 +107,14 @@ def normalize(raw: str) -> str:
     text = text.replace("\u00ad", "").replace("\x00", "")
     text = _HYPHENATED_LINEBREAK.sub(r"\1\2", text)
     text = _MULTIPLE_SPACES.sub(" ", text)
-    text = _SPACE_AROUND_NEWLINE.sub("\n", text)
+    # Spaces and tabs around a line break, removed line by line rather
+    # than with a pattern that starts on optional whitespace: such a
+    # pattern restarts on every character of a run of spaces, which
+    # costs 4.6 s on 80 000 of them. Harmless today, because the line
+    # above has already collapsed those runs - but that is a guarantee
+    # held by the ORDER of two lines, over text a stranger uploaded.
+    # This version is linear whatever the order.
+    text = "\n".join(line.strip(" \t") for line in text.split("\n"))
     text = _EXTRA_NEWLINES.sub("\n\n", text)
     return text.strip()
 

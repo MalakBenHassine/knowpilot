@@ -232,10 +232,17 @@ async def test_a_shorter_reindex_leaves_no_stale_chunk(db: Db) -> None:
 
 
 async def test_chunk_ids_are_deterministic() -> None:
-    document_id = uuid.uuid4()
+    """Pinned values, not a call compared to itself.
 
-    assert chunk_id(document_id, 3) == chunk_id(document_id, 3)
-    assert chunk_id(document_id, 3) != chunk_id(document_id, 4)
+    Running the function twice in one process would still pass if the scheme
+    changed tomorrow - and a changed scheme means every chunk already stored
+    keeps an id nothing computes any more: the old passages stay in the
+    table forever, answering questions nobody can trace.
+    """
+    document_id = uuid.UUID("11111111-2222-4333-8444-555555555555")
+
+    assert chunk_id(document_id, 3) == "201fee72-c690-5489-9557-e2c9cbc5f926"
+    assert chunk_id(document_id, 4) == "9a147e5e-d3a7-5b4d-8893-1898410e1e39"
 
 
 async def test_deleting_a_document_removes_its_chunks(db: Db) -> None:
