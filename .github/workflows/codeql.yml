@@ -1,0 +1,54 @@
+name: CodeQL
+
+# SAST, and it is NOT what SonarQube does. Sonar grades the code - bugs,
+# smells, duplication, coverage. CodeQL follows data: it reports a value that
+# reaches a dangerous sink, so it finds injection and path traversal that a
+# rule-based linter cannot see. Free on public repositories, and its findings
+# land in the repository's Security tab.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # A query pack updated next month can find a flaw in code nobody touched.
+  schedule:
+    - cron: "30 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyse:
+    name: Analyse ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # Writing the alerts to the Security tab.
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # build-mode: none - neither language is compiled, so CodeQL reads the
+      # sources directly and no dependency install is needed.
+      - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          # security-extended adds the queries with a slightly lower
+          # precision, which is the right trade-off for an application that
+          # handles other people's documents.
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          category: /language:${{ matrix.language }}

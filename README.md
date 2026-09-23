@@ -25,7 +25,7 @@
 | Authentication | Keycloak (OpenID Connect), Backend-for-Frontend      |
 | RAG            | LangChain, BGE-M3 embeddings, pgvector, Groq LLM     |
 | Data           | PostgreSQL, Redis                                    |
-| DevSecOps      | GitHub Actions, SonarCloud, Snyk, Trivy, gitleaks    |
+| DevSecOps      | GitHub Actions, SonarQube Cloud, CodeQL, Trivy, gitleaks, Dependabot |
 | Infrastructure | Docker Compose, Caddy, Let's Encrypt, Prometheus        |
 
 ## Running the services
@@ -142,6 +142,28 @@ The interface models the four outcomes of a question explicitly: **loading**
 (retrieving, then generating), **answered with sources**, **insufficient
 evidence**, and **error**. "Insufficient evidence" is a valid answer, not a
 failure, and is styled accordingly.
+
+## Quality and security checks
+
+Every pull request runs these, and each one blocks the merge:
+
+| Check | Tool | A failure means |
+| --- | --- | --- |
+| Lint, format, types | ruff, mypy, ESLint, tsc | the code does not match the rules the rest of the code follows |
+| Tests | pytest offline, pytest against a real pgvector, vitest | behaviour changed |
+| Quality gate | SonarQube Cloud | new code under 80% coverage, a bug, a smell, or duplication |
+| SAST | CodeQL, `security-extended` | a value reaches a dangerous sink - injection, path traversal |
+| Dependencies | Trivy (lock files), Dependabot | a known HIGH or CRITICAL vulnerability that has a fix |
+| Configuration | Trivy (Compose, Dockerfiles) | an insecure setting in the infrastructure files |
+| Secrets | gitleaks, over the whole history | a credential in any commit, including one later removed |
+
+Sonar and CodeQL are not redundant: Sonar grades the code, CodeQL follows
+data through it. The first finds what is badly written, the second finds what
+is exploitable.
+
+Snyk is deliberately absent. Trivy already reads the same lock files and
+Dependabot already opens the upgrade pull requests; a third scanner over the
+same dependencies produces duplicate findings, not more safety.
 
 ## Deploying
 

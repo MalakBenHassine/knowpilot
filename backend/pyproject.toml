@@ -60,11 +60,23 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 addopts = "-q"
 
+# Coverage is measured for SonarQube Cloud (sonar-project.properties).
+# Branch coverage, not line coverage: a taken `if` whose `else` never runs
+# is half-tested, and line coverage calls it covered.
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+# Tests are not the subject of the measurement.
+omit = ["tests/*", "evals/*"]
+
 [dependency-groups]
 dev = [
     "httpx2>=2.13.0",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "reportlab>=5.0.1",
     "ruff>=0.16.8",
     "types-reportlab>=5.0.0.20260911",

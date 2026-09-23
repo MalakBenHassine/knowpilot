@@ -1,0 +1,101 @@
+name: Quality
+
+# SonarQube Cloud analyses the two code bases as ONE project: a monorepo whose
+# halves are graded separately hides the shared problems. Free for public
+# repositories.
+#
+# Requires the repository secret SONAR_TOKEN, and "Automatic Analysis" turned
+# OFF on sonarcloud.io - otherwise Sonar analyses the repository on its own,
+# without coverage, and ignores what this workflow uploads.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonar:
+    name: SonarQube Cloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Coverage is only meaningful if the database tests run: they cover tenant
+    # isolation, the keyword search and the context window - the code that
+    # matters most. Without PostgreSQL they are skipped and Sonar would report
+    # the retrieval layer as untested.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+        env:
+          POSTGRES_USER: knowpilot
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: knowpilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U knowpilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KP_ENVIRONMENT: ci
+      KP_POSTGRES_HOST: localhost
+      KP_POSTGRES_PORT: "5432"
+      KP_POSTGRES_USER: knowpilot
+      KP_POSTGRES_PASSWORD: ci-only-password
+      KP_POSTGRES_DB: knowpilot
+      KP_RUN_DB_TESTS: "1"
+    steps:
+      # Sonar needs the full history to attribute an issue to the commit that
+      # introduced it, which is what "new code" in the quality gate means.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Same hardening as the other workflows: no source distribution built,
+      # no npm lifecycle script, no resolution outside the lock files.
+      - name: Backend dependencies
+        working-directory: backend
+        run: uv sync --frozen --no-build
+
+      - name: Migrate
+        working-directory: backend
+        run: uv run --no-sync alembic upgrade head
+
+      - name: Backend coverage
+        working-directory: backend
+        run: uv run --no-sync pytest --cov --cov-report=xml
+
+      - name: Frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+
+      - name: Frontend coverage
+        working-directory: frontend
+        run: npm run test:coverage
+
+      # sonar.qualitygate.wait makes the gate BLOCK: a run that lowers coverage
+      # or adds a vulnerability fails the pull request. A gate that only
+      # reports is a dashboard, not a gate.
+      - uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: -Dsonar.qualitygate.wait=true
