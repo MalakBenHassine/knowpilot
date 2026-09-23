@@ -173,6 +173,12 @@ class Settings(BaseSettings):
     chat_requests_per_minute: int = Field(default=10, gt=0)
     upload_requests_per_minute: int = Field(default=10, gt=0)
 
+    # --- The worker's metrics exporter (app/worker.py) ---
+    # The API serves /metrics on its own port, through the application. The
+    # worker has no HTTP server, so it opens this one - reachable only on the
+    # internal network, never published by the reverse proxy.
+    worker_metrics_port: int = Field(default=9100, gt=0, le=65535)
+
     @model_validator(mode="after")
     def _budgets_are_coherent(self) -> "Settings":
         """A per-user limit above the service limit can never be reached.

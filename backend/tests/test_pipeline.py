@@ -14,6 +14,7 @@ from typing import Any
 import anyio
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from prometheus_client import REGISTRY
 
 from app.db.models import EMBEDDING_DIMENSIONS
 from app.rag.pipeline import StoredFile, ingest_document
@@ -177,3 +178,63 @@ def test_a_failure_while_saving_is_reported_not_swallowed(tmp_path: Path) -> Non
     # retry button, not a document stuck in `processing`.
     assert store.stages[-1] == "indexing"
     assert store.failure == ("processing_error", True)
+
+
+# --- What the worker exports ------------------------------------------------
+#
+# The API's metrics come from its own routes; these are the only numbers that
+# say whether uploads are becoming passages at all. The API can answer every
+# request while every document rots in `processing`.
+
+
+def counted(outcome: str) -> float:
+    return REGISTRY.get_sample_value("knowpilot_ingestions_total", {"outcome": outcome}) or 0.0
+
+
+def measured() -> float:
+    return REGISTRY.get_sample_value("knowpilot_ingestion_duration_seconds_count") or 0.0
+
+
+def test_an_indexed_document_is_counted_with_its_passages(tmp_path: Path) -> None:
+    store = FakeStore(write_note(tmp_path))
+    before, timed = counted("indexed"), measured()
+
+    run(store)
+
+    assert counted("indexed") == before + 1
+    assert measured() == timed + 1
+    chunks = REGISTRY.get_sample_value("knowpilot_ingestion_chunks_count") or 0.0
+    assert chunks > 0
+
+
+def test_each_failure_is_counted_under_its_own_reason(tmp_path: Path) -> None:
+    store = FakeStore(write_note(tmp_path), mime_type="application/x-tar")
+    before = counted("unsupported_format")
+
+    run(store)
+
+    # The reason, not a single "failed": "this format is refused" and "the
+    # disk is full" call for different people at different hours.
+    assert counted("unsupported_format") == before + 1
+
+
+def test_a_document_that_vanished_is_counted_but_not_timed(tmp_path: Path) -> None:
+    store = FakeStore(None)
+    before, timed = counted("gone"), measured()
+
+    run(store)
+
+    assert counted("gone") == before + 1
+    # Deliberately NOT timed: nothing was done, and a pile of zero-second
+    # ingestions would drag the histogram towards a speed nobody achieved.
+    assert measured() == timed
+
+
+def test_a_slow_failure_is_timed_like_a_success(tmp_path: Path) -> None:
+    """A failure that takes nine minutes to arrive is its own problem."""
+    store = FakeStore(write_note(tmp_path))
+    timed = measured()
+
+    run(store, ExplodingEmbeddings())
+
+    assert measured() == timed + 1

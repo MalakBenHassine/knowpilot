@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from arq import func
 from arq.connections import RedisSettings
+from prometheus_client import start_http_server
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -79,6 +80,13 @@ async def startup(context: dict[str, Any]) -> None:
     # The worker handles every document of every user: the same privacy rule
     # as the API, checked before anything is loaded.
     ensure_tracing_is_deliberate(allowed=settings.langsmith_tracing_allowed)
+
+    # Started before the model loads, which takes twenty seconds: a scrape
+    # during start-up should find a worker that is up and not yet ready,
+    # rather than a connection refused that looks like a dead process.
+    # A background thread serving one page; it costs nothing while idle.
+    start_http_server(settings.worker_metrics_port)
+    logger.info("worker metrics on :%d", settings.worker_metrics_port)
 
     engine = create_engine(settings.database_url)
     context["engine"] = engine

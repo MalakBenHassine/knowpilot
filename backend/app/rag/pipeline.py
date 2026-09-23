@@ -17,6 +17,7 @@ parsing and real splitting.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ import anyio.to_thread
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
+from app.core.metrics import INGESTION_CHUNKS, INGESTION_DURATION, INGESTIONS
 from app.rag.chunking import split_pages
 from app.rag.loaders import UploadedFileLoader
 from app.rag.parsing import (
@@ -100,11 +102,14 @@ async def ingest_document(
     left to receive an error: an escaped exception would leave the document
     stuck in `processing` for ever, showing a spinner the user cannot stop.
     """
+    started = time.perf_counter()
+
     found = await store.load(document_id, owner_id)
     if found is None:
         # The user deleted the document in between, or the upload rolled back.
         # Nothing to do, and certainly nothing to fail about.
         logger.info("document %s is gone, skipping indexing", document_id)
+        INGESTIONS.labels(outcome="gone").inc()
         return
 
     try:
@@ -146,15 +151,23 @@ async def ingest_document(
             len(chunks),
             sum(1 for page in pages if page.metadata.get("extraction") == "ocr"),
         )
+        INGESTIONS.labels(outcome="indexed").inc()
+        INGESTION_CHUNKS.observe(len(chunks))
     except ParsingError as error:
         reason, retryable = _classify(error)
         # Expected failures: a scanned image, a format we refuse. Logged at
         # info level because they are the system working, not breaking.
         logger.info("document %s failed with %s", document_id, reason)
         await store.mark_failed(document_id, reason, retryable)
+        INGESTIONS.labels(outcome=reason).inc()
     except Exception:
         # Anything unforeseen: a full disk, a killed connection, a bug of ours.
         # The cause goes to the logs with its traceback; the user gets a code
         # and a retry button, never an internal message.
         logger.exception("document %s failed unexpectedly", document_id)
         await store.mark_failed(document_id, "processing_error", True)
+        INGESTIONS.labels(outcome="processing_error").inc()
+    finally:
+        # Measured for every verdict, not only for the good one: a failure
+        # that takes nine minutes to arrive is its own problem.
+        INGESTION_DURATION.observe(time.perf_counter() - started)

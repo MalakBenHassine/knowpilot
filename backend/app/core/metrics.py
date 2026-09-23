@@ -8,6 +8,9 @@ Three families, each answering a question an operator actually asks:
   rate will never show.
 - Tokens - how fast is the provider's daily budget going? The free tier has
   one, and running out of it is an outage that looks like success until 4 pm.
+- Ingestion - is the worker turning uploads into passages, how long does it
+  take, and what proportion fails? The API can be perfectly healthy while
+  every upload rots in `processing`, and no HTTP metric would say so.
 
 Rules, because metrics are an API too:
 
@@ -92,6 +95,39 @@ TOKENS = Counter(
     "knowpilot_llm_tokens_total",
     "Tokens reported by the provider, by model and direction.",
     ["model", "direction"],  # direction: input, output
+)
+
+# Exported by the WORKER process, not the API: a second exporter, on its own
+# port, because the two processes fail independently and an operator needs to
+# see which one stopped.
+IngestionOutcome = Literal[
+    "indexed",  # passages are in the table
+    "gone",  # deleted between the upload and the job
+    "unsupported_format",
+    "no_text_found",
+    "too_large",
+    "processing_error",  # unforeseen: a bug, a full disk, a dropped connection
+]
+
+INGESTIONS = Counter(
+    "knowpilot_ingestions_total",
+    "Documents the worker finished with, by outcome.",
+    ["outcome"],
+)
+
+# Up to ten minutes by design (the job timeout), so the buckets go that far.
+# A document that takes five minutes is not broken; one that takes eleven has
+# been killed, and the count below the top bucket is where that shows.
+INGESTION_DURATION = Histogram(
+    "knowpilot_ingestion_duration_seconds",
+    "Time from picking a document up to its verdict.",
+    buckets=(1, 2.5, 5, 10, 30, 60, 120, 300, 600),
+)
+
+INGESTION_CHUNKS = Histogram(
+    "knowpilot_ingestion_chunks",
+    "Passages produced per indexed document.",
+    buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000),
 )
 
 
