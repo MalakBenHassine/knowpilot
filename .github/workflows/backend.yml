@@ -38,26 +38,27 @@ jobs:
       # silently resolves a different set of versions than the developer had.
       # --no-build refuses source distributions, whose setup.py would run
       # here, on a runner holding a token. Every dependency ships wheels.
-      # Every `uv run` below then uses --no-sync: this environment, as it
-      # was installed, with no resolution behind the back of the lock file.
+      # Every `uv run` below repeats both: --no-sync uses this environment
+      # as it was installed, and --no-build keeps the guarantee even if a
+      # later change makes one of them install something after all.
       - name: Install dependencies
         run: uv sync --frozen --no-build
 
       - name: Lint
-        run: uv run --no-sync ruff check .
+        run: uv run --no-sync --no-build ruff check .
 
       - name: Format check
-        run: uv run --no-sync ruff format --check .
+        run: uv run --no-sync --no-build ruff format --check .
 
       # Tests and evaluation code too: a test that type-checks is a test
       # that exercises the API it claims to, not one that only happens to run.
       - name: Typecheck
-        run: uv run --no-sync mypy app tests evals scripts
+        run: uv run --no-sync --no-build mypy app tests evals scripts
 
       # Offline: fast feedback. The database tests are skipped here and run
       # in the job below, against a real PostgreSQL.
       - name: Tests
-        run: uv run --no-sync pytest
+        run: uv run --no-sync --no-build pytest
 
   # The tests that matter most need PostgreSQL: tenant isolation through the
   # real PGVectorStore, the keyword search, the context window, the subject
@@ -107,19 +108,19 @@ jobs:
       # The schema comes from the migrations, exactly as in production - never
       # from create_all, which would test a schema nobody deploys.
       - name: Migrate
-        run: uv run --no-sync alembic upgrade head
+        run: uv run --no-sync --no-build alembic upgrade head
 
       # Every migration must be reversible: a deployment that cannot be
       # rolled back is a deployment that cannot fail safely.
       - name: Migrations round-trip
         run: |
-          uv run --no-sync alembic downgrade base
-          uv run --no-sync alembic upgrade head
+          uv run --no-sync --no-build alembic downgrade base
+          uv run --no-sync --no-build alembic upgrade head
 
       # Fails when the models and the migrations disagree: a column added to
       # a model without its migration would otherwise surface in production.
       - name: Models match migrations
-        run: uv run --no-sync alembic check
+        run: uv run --no-sync --no-build alembic check
 
       # A database test that is SKIPPED here is the original problem back in
       # disguise: a green job that ran nothing. So a skip for want of a
@@ -128,7 +129,7 @@ jobs:
       - name: Tests, with the database
         shell: bash
         run: |
-          uv run --no-sync pytest -rs | tee pytest.log
+          uv run --no-sync --no-build pytest -rs | tee pytest.log
           if grep -q "set KP_RUN_DB_TESTS" pytest.log; then
             echo "::error::database tests were skipped in the database job"
             exit 1
