@@ -1,0 +1,39 @@
+# Vulnerabilities the release gate accepts, for now.
+#
+# An entry here is a DECISION, not a silence: it names the CVE, says why this
+# deployment can carry it, and expires. On the expiry date Trivy reports it
+# again and the release fails until someone looks - which is the point. A
+# scanner whose findings can be switched off for good is a scanner nobody
+# reads.
+#
+# Nothing in here may be a vulnerability in our own code or our own
+# dependencies. Those are fixed, never ignored.
+
+vulnerabilities:
+  - id: CVE-2025-59250
+    statement: >-
+      Microsoft's JDBC driver, shipped inside the Keycloak distribution.
+      KnowPilot runs Keycloak on PostgreSQL only (ADR-0020), and the image is
+      built with `kc.sh build --db=postgres`, so this driver is never loaded.
+      Removing the four unused database drivers from the image is the real
+      fix and needs a start-up test first.
+    expired_at: 2026-12-31
+
+  - id: CVE-2026-8763
+    statement: >-
+      Bouncy Castle 1.84, inside the Keycloak distribution. Keycloak 26.7.4 is
+      the latest release and still ships 1.84, so no version of Keycloak
+      carries the fix today. Re-check when 26.8 is published.
+    expired_at: 2026-12-31
+
+  - id: CVE-2026-13506
+    statement: >-
+      Bouncy Castle 1.84, same distribution and same reason as CVE-2026-8763.
+    expired_at: 2026-12-31
+
+  - id: CVE-2026-75595
+    statement: >-
+      Netty 4.1.136, inside the Keycloak distribution. Fixed upstream in
+      4.1.137, which Keycloak has not shipped yet. Keycloak is not exposed
+      directly: Caddy terminates TLS and is the only published container.
+    expired_at: 2026-12-31

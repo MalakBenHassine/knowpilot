@@ -165,6 +165,20 @@ Snyk is deliberately absent. Trivy already reads the same lock files and
 Dependabot already opens the upgrade pull requests; a third scanner over the
 same dependencies produces duplicate findings, not more safety.
 
+And on `main`, before an image can be released:
+
+| Check | Tool | A failure means |
+| --- | --- | --- |
+| Image vulnerabilities | Trivy, on each architecture's digest | a HIGH or CRITICAL with a fix reached an image |
+| Signature | cosign, keyless, verified in the same job | the release cannot prove what it built |
+
+The images are pushed **by digest, without a tag**: nothing can pull them
+until the scan passes and the tags are written. The tag is the gate, not the
+push. What the gate accepts anyway lives in
+[.trivyignore.yaml](.trivyignore.yaml) - each entry names a CVE, says why this
+deployment can carry it, and **expires**, so it comes back for review instead
+of being forgotten.
+
 ## Deploying
 
 One VM, Docker Compose, Caddy for HTTPS: [docs/deploy.md](docs/deploy.md) is

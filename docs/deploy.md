@@ -59,6 +59,21 @@ The first time, make the three `knowpilot-*` packages public on GitHub
 (Packages → Package settings → Change visibility). Otherwise, run
 `docker login ghcr.io` with a token that has `read:packages` only.
 
+**Check the signature before the first pull.** Every image is signed by the
+Release workflow with a keyless certificate; verifying it is what turns "the
+registry served me these bytes" into "CI built these bytes, from this commit".
+Install cosign once, then, for each of the three images:
+
+```bash
+IMAGE=ghcr.io/malakbenhassine/knowpilot-backend:<sha>
+cosign verify "$IMAGE" \
+  --certificate-identity "https://github.com/MalakBenHassine/knowpilot/.github/workflows/release.yml@refs/heads/main" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+```
+
+A failure here means the tag does not point at what the workflow produced.
+Stop and find out why; do not start the stack.
+
 **Or built on the server:** leave both variables unset, then:
 
 ```bash
