@@ -1,0 +1,89 @@
+# The only door into the production stack (ADR-0020).
+#
+# One domain, one certificate, one origin: the SPA at /, the API at /api,
+# Keycloak's login pages at /auth. The browser sees a single origin, which the
+# session design requires - a `__Host-` cookie is only ever sent same-origin,
+# and there is no CORS to configure because there is nothing cross-origin.
+#
+# Everything not listed here is NOT reachable: the database, Redis, the
+# worker, Keycloak's admin console and management port, and the API's
+# /metrics - which exists on the internal network for Prometheus only.
+
+{
+	# The address Let's Encrypt writes to before a certificate expires. Caddy
+	# renews by itself, 30 days ahead; the email is for the day it cannot.
+	email {$KP_ACME_EMAIL}
+}
+
+{$KP_DOMAIN} {
+	# --- Headers for every response -------------------------------------
+	header {
+		# HTTPS only, for a year, remembered by the browser: a user on a
+		# hostile network cannot be downgraded to plain HTTP after their
+		# first visit. No includeSubDomains: the domain may be a subdomain of
+		# something we do not own (sslip.io, duckdns.org).
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		# The version of the proxy is nobody's business.
+		-Server
+	}
+
+	# --- The API ------------------------------------------------------------
+	handle /api/* {
+		# 21 MB: the API refuses uploads over 20 MB itself; refusing larger
+		# bodies here stops them before a single byte crosses to the backend.
+		request_body {
+			max_size 21MB
+		}
+		reverse_proxy api:8000 {
+			# Flush every write as it comes. The chat stream is Server-Sent
+			# Events: a proxy that buffers turns streaming back into waiting
+			# for the whole answer (ADR-0016).
+			flush_interval -1
+		}
+	}
+
+	# --- Keycloak -------------------------------------------------------------
+	# The admin console and the master realm - the realm whose login IS the
+	# administrator's - are never served to the internet. Administration goes
+	# through `kcadm.sh` inside the container (infra/keycloak/setup-realm.sh).
+	@keycloak_admin path /auth/admin* /auth/realms/master*
+	handle @keycloak_admin {
+		respond 404
+	}
+
+	handle /auth/* {
+		encode zstd gzip
+		# Keycloak builds its URLs from X-Forwarded-*, which Caddy sets; the
+		# container trusts them because only this proxy can reach it.
+		reverse_proxy keycloak:8080
+	}
+
+	# --- The single-page application -------------------------------------------
+	handle {
+		header {
+			# The SPA loads nothing from any other origin, so everything is
+			# 'self'. 'unsafe-inline' for styles only: React sets style
+			# attributes, and inline STYLE cannot run code. No inline script
+			# is allowed, which is what makes an injected <script> inert.
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		}
+		reverse_proxy frontend:8080
+	}
+
+	# Access logs as JSON, with the OAuth callback's `code` and `state`
+	# removed: an authorisation code is single-use and PKCE-bound, and still
+	# has no business in a file that travels. Cookies and Authorization
+	# headers are already redacted by Caddy's defaults.
+	log {
+		output stdout
+		format filter {
+			wrap json
+			request>uri query {
+				delete code
+				delete state
+			}
+		}
+	}
+}

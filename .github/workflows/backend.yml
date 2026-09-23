@@ -48,7 +48,7 @@ jobs:
       # Tests and evaluation code too: a test that type-checks is a test
       # that exercises the API it claims to, not one that only happens to run.
       - name: Typecheck
-        run: uv run mypy app tests evals
+        run: uv run mypy app tests evals scripts
 
       # Offline: fast feedback. The database tests are skipped here and run
       # in the job below, against a real PostgreSQL.

@@ -1,0 +1,334 @@
+# Production stack, for one virtual machine (ADR-0020).
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# The full procedure - first deployment, updates, backups - is docs/deploy.md.
+#
+# What reaches the internet is ONE container: Caddy, on 80 and 443. Everything
+# else talks on two private networks:
+#
+#   edge      caddy, frontend, api, keycloak     the proxy's upstreams, with egress
+#   backend   api, worker, keycloak, postgres,   INTERNAL: no route to the internet
+#             redis, migrate
+#
+# The API is on both because it calls the language model; the worker is on
+# `backend` only, because it has nothing to say to the outside world - a
+# compromised parser cannot exfiltrate a document over a network it is not on.
+#
+# Start order is enforced, not hoped for:
+#
+#   model (download weights) ──┐
+#   postgres ─► migrate ───────┼─► api, worker
+#   redis ─────────────────────┘
+
+# Not "knowpilot": that is the development stack, and a shared project name
+# means shared VOLUME names - production migrations run against the laptop
+# database the day both files are used on one machine.
+name: knowpilot-prod
+
+# --- Shared blocks ------------------------------------------------------------
+
+x-logging: &logging
+  # Bounded logs: Docker's default json-file driver never rotates, and a full
+  # disk takes the database down with it.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-backend-image: &backend-image
+  # Built by CI and pulled by tag (docs/deploy.md), or built here with
+  # `docker compose build` - the same Dockerfile either way.
+  image: ${KP_IMAGE_REGISTRY:-knowpilot}/knowpilot-backend:${KP_IMAGE_TAG:-local}
+  build: ./backend
+
+x-backend-env: &backend-env
+  KP_ENVIRONMENT: production
+  KP_POSTGRES_HOST: postgres
+  KP_POSTGRES_PORT: "5432"
+  KP_POSTGRES_USER: ${KP_POSTGRES_USER:?KP_POSTGRES_USER is required}
+  KP_POSTGRES_PASSWORD: ${KP_POSTGRES_PASSWORD:?KP_POSTGRES_PASSWORD is required}
+  KP_POSTGRES_DB: ${KP_POSTGRES_DB:?KP_POSTGRES_DB is required}
+  # hex passwords only (docs/deploy.md): the value is inside a URL.
+  KP_REDIS_URL: redis://:${KP_REDIS_PASSWORD:?KP_REDIS_PASSWORD is required}@redis:6379/0
+  KP_OIDC_ISSUER: https://${KP_DOMAIN:?KP_DOMAIN is required}/auth/realms/knowpilot
+  KP_OIDC_CLIENT_SECRET: ${KP_OIDC_CLIENT_SECRET:?KP_OIDC_CLIENT_SECRET is required}
+  KP_FRONTEND_URL: https://${KP_DOMAIN}
+  KP_UPLOAD_ROOT: /data/uploads
+  KP_EMBEDDING_CACHE_DIR: /models
+  # The weights are in the volume, put there by the `model` job: nothing at
+  # runtime may reach the model hub.
+  HF_HUB_OFFLINE: "1"
+  # Optional tunables. Unset in .env.production means EMPTY here, and the
+  # application treats an empty variable as absent (env_ignore_empty): the
+  # defaults live in app/core/config.py only, never copied into this file.
+  # Leaving KP_GROQ_API_KEY empty runs the product without generation.
+  KP_GROQ_API_KEY: ${KP_GROQ_API_KEY:-}
+  KP_GROQ_MODEL: ${KP_GROQ_MODEL:-}
+  KP_GROQ_CHECK_MODEL: ${KP_GROQ_CHECK_MODEL:-}
+  KP_SUBJECT_CHECK_ENABLED: ${KP_SUBJECT_CHECK_ENABLED:-}
+  KP_LOG_LEVEL: ${KP_LOG_LEVEL:-}
+  KP_TIMEZONE: ${KP_TIMEZONE:-}
+  KP_DAILY_QUESTIONS_PER_USER: ${KP_DAILY_QUESTIONS_PER_USER:-}
+  KP_DAILY_QUESTIONS_PER_SERVICE: ${KP_DAILY_QUESTIONS_PER_SERVICE:-}
+  KP_CHAT_REQUESTS_PER_MINUTE: ${KP_CHAT_REQUESTS_PER_MINUTE:-}
+  KP_UPLOAD_REQUESTS_PER_MINUTE: ${KP_UPLOAD_REQUESTS_PER_MINUTE:-}
+  KP_MAX_DISTANCE: ${KP_MAX_DISTANCE:-}
+  KP_TOP_K: ${KP_TOP_K:-}
+  KP_KEYWORD_SEARCH_ENABLED: ${KP_KEYWORD_SEARCH_ENABLED:-}
+  KP_MIN_KEYWORD_COVERAGE: ${KP_MIN_KEYWORD_COVERAGE:-}
+  KP_PASSAGE_CONTEXT_ENABLED: ${KP_PASSAGE_CONTEXT_ENABLED:-}
+
+x-hardened: &hardened
+  restart: unless-stopped
+  logging: *logging
+  # A process that gains privileges through a setuid binary gains nothing.
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # --- The edge ----------------------------------------------------------------
+
+  caddy:
+    <<: *hardened
+    image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
+    # The only published ports of the whole stack. 443/udp is HTTP/3.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      KP_DOMAIN: ${KP_DOMAIN}
+      KP_ACME_EMAIL: ${KP_ACME_EMAIL:?KP_ACME_EMAIL is required}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account. Losing them means asking Let's
+      # Encrypt again, and its rate limits are counted per week.
+      - caddy_data:/data
+      - caddy_config:/config
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    networks:
+      edge:
+        # The API reaches Keycloak through the PUBLIC URL - the issuer in
+        # every token must be the one browsers see. This alias makes that
+        # hop stay inside the machine instead of leaving and coming back
+        # through the firewall.
+        aliases:
+          - ${KP_DOMAIN}
+    mem_limit: 256m
+
+  frontend:
+    <<: *hardened
+    image: ${KP_IMAGE_REGISTRY:-knowpilot}/knowpilot-frontend:${KP_IMAGE_TAG:-local}
+    build:
+      context: ./frontend
+      args:
+        VITE_API_MODE: http
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    networks: [edge]
+    mem_limit: 128m
+
+  # --- The application -------------------------------------------------------
+
+  api:
+    <<: [*hardened, *backend-image]
+    environment:
+      <<: *backend-env
+    volumes:
+      - models:/models:ro
+      - uploads:/data/uploads
+    # The code cannot be modified at runtime, by a bug or by an attacker.
+    # /tmp is the one writable place, in memory, gone at every restart.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    networks: [edge, backend]
+    depends_on:
+      model:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # 2.2 GB of weights, and headroom for a batch of questions.
+    mem_limit: 3g
+
+  worker:
+    <<: [*hardened, *backend-image]
+    command: ["arq", "app.worker.WorkerSettings"]
+    environment:
+      <<: *backend-env
+    volumes:
+      - models:/models:ro
+      - uploads:/data/uploads
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    # `backend` only: no route to the internet (see the header).
+    networks: [backend]
+    # The image's healthcheck is the API's HTTP probe. The worker has no
+    # port; arq checks the health key the worker refreshes in Redis.
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.worker.WorkerSettings"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    depends_on:
+      model:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    mem_limit: 3g
+
+  # --- One-shot jobs ---------------------------------------------------------------
+
+  # Puts the embedding weights into the `models` volume, then exits. On an
+  # update with the weights already there, it only proves they load.
+  model:
+    <<: *backend-image
+    command: ["python", "-m", "scripts.fetch_model"]
+    environment:
+      KP_EMBEDDING_CACHE_DIR: /models
+      HF_HUB_OFFLINE: "0"
+      # BAAI/bge-m3 publishes pytorch_model.bin only. After loading it,
+      # transformers starts a background thread that downloads a SECOND
+      # 2.27 GB copy, converted to safetensors, from a pull-request branch -
+      # and the job cannot exit until it is done. Found by the local
+      # rehearsal: a 4.5 GB download for a 2.2 GB model.
+      DISABLE_SAFETENSORS_CONVERSION: "1"
+    volumes:
+      - models:/models
+    # Its own network, with egress: the only container allowed to download.
+    networks: [downloads]
+    restart: "no"
+    logging: *logging
+    # The image carries the API's HTTP healthcheck. A job has no server, and
+    # would show as "unhealthy" for as long as it runs.
+    healthcheck:
+      disable: true
+
+  # Applies the migrations, then exits. The API and the worker start only if
+  # it succeeded: a schema one migration behind the code is how a deployment
+  # corrupts data rather than failing.
+  migrate:
+    <<: *backend-image
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *backend-env
+    networks: [backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *logging
+    healthcheck:
+      disable: true
+
+  # --- State ------------------------------------------------------------------------
+
+  postgres:
+    <<: *hardened
+    image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    environment:
+      POSTGRES_USER: ${KP_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${KP_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${KP_POSTGRES_DB}
+      KP_KEYCLOAK_DB: ${KP_KEYCLOAK_DB:?KP_KEYCLOAK_DB is required}
+      KP_KEYCLOAK_DB_USER: ${KP_KEYCLOAK_DB_USER:?KP_KEYCLOAK_DB_USER is required}
+      KP_KEYCLOAK_DB_PASSWORD: ${KP_KEYCLOAK_DB_PASSWORD:?KP_KEYCLOAK_DB_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    # No `ports`: reachable from the backend network only.
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    mem_limit: 1g
+
+  redis:
+    <<: *hardened
+    image: redis:8.8.2-alpine@sha256:96cb544fa0af5aa898d160cffb7dae70c3df117190fc123831c64712cda425ff
+    # A password even on a private network: defence in depth costs one
+    # setting. `noeviction`, because Redis holds the job queue - a queue
+    # that silently drops jobs under memory pressure loses uploads.
+    command:
+      - sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_PASSWORD" --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy noeviction
+    environment:
+      REDIS_PASSWORD: ${KP_REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 320m
+
+  keycloak:
+    <<: *hardened
+    image: ${KP_IMAGE_REGISTRY:-knowpilot}/knowpilot-keycloak:${KP_IMAGE_TAG:-local}
+    build: ./infra/keycloak
+    environment:
+      # The URL browsers use, path included: every redirect, every token
+      # issuer and every link in the login pages is built from it.
+      KC_HOSTNAME: https://${KP_DOMAIN}/auth
+      # TLS ends at Caddy; the hop from Caddy is on the private network.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: ${KP_KEYCLOAK_DB}
+      KC_DB_USERNAME: ${KP_KEYCLOAK_DB_USER}
+      KC_DB_PASSWORD: ${KP_KEYCLOAK_DB_PASSWORD}
+      # Creates the first administrator on an empty database, and only then.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KP_KEYCLOAK_ADMIN:?KP_KEYCLOAK_ADMIN is required}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KP_KEYCLOAK_ADMIN_PASSWORD:?KP_KEYCLOAK_ADMIN_PASSWORD is required}
+    cap_drop: [ALL]
+    networks: [edge, backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The management port (9000) is never routed by Caddy. The image has
+      # no curl: bash opens the TCP socket itself.
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/9000; echo -e 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '\"status\": \"UP\"' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: 1g
+
+networks:
+  edge: {}
+  backend:
+    # No gateway to the outside world. Containers here reach each other and
+    # nothing else.
+    internal: true
+  downloads: {}
+
+volumes:
+  postgres_data:
+  redis_data:
+  models:
+  uploads:
+  caddy_data:
+  caddy_config:

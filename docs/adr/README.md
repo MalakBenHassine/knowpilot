@@ -28,6 +28,7 @@ decisions is as useful as the decisions themselves.
 | [0017](0017-context-window-around-passages.md) | Read each passage with the chunk before it | Accepted |
 | [0018](0018-subjects-no-passage-names.md) | Tell the user what no passage names, instead of asking the model not to generalise | Accepted |
 | [0019](0019-prometheus-metrics.md) | Prometheus metrics, on an endpoint the internet cannot reach | Accepted |
+| [0020](0020-single-vm-compose-deployment.md) | Deploy on one VM with Docker Compose, behind Caddy | Accepted |
 
 ## Template
 

@@ -2,16 +2,21 @@
 
 > A private, multi-user AI assistant that answers questions from your own documents, with source citations.
 
-**Status:** 🚧 Early development. The application is not usable yet.
+**Status:** feature-complete v1, deployable to a single VM (docs/deploy.md).
 
-## Planned features
+## Features
 
-- Upload PDF and text documents to a private space
-- Ask questions in natural language
-- Get answers grounded in your documents, with citations to the exact source
-- Get an explicit "not found" answer when your documents do not contain the information
+- Upload PDF and text documents to a private space (text-layer PDFs: OCR for scans
+  is designed in ADR-0010 but not wired yet)
+- Ask questions in natural language, and read the answer as it is generated
+- Every statement cites the passage it comes from, and each source card quotes it
+- An explicit "not found" when the documents do not contain the answer - and a
+  notice when an answer rests on something the documents never name
+- Accounts through Keycloak; every document, passage and question is scoped to
+  its owner, down to the SQL
+- Daily question budgets and per-minute limits, Prometheus metrics
 
-## Planned tech stack
+## Tech stack
 
 | Layer          | Technology                                           |
 | -------------- | ---------------------------------------------------- |
@@ -21,7 +26,7 @@
 | RAG            | LangChain, BGE-M3 embeddings, pgvector, Groq LLM     |
 | Data           | PostgreSQL, Redis                                    |
 | DevSecOps      | GitHub Actions, SonarCloud, Snyk, Trivy, gitleaks    |
-| Infrastructure | Docker Compose, Kubernetes (k3s), Nginx, Let's Encrypt |
+| Infrastructure | Docker Compose, Caddy, Let's Encrypt, Prometheus        |
 
 ## Running the services
 
@@ -128,12 +133,19 @@ npm install
 npm run dev     # http://localhost:5173
 ```
 
-The API does not exist yet, so the UI runs against an **in-memory mock backend**
-that implements the documented contract (`VITE_API_MODE=mock`, the default).
-Switching to the real API is a single environment variable — no component or
-hook knows the difference.
+By default the UI runs against an **in-memory mock backend** that implements
+the documented contract (`VITE_API_MODE=mock`), so the interface can be worked
+on without the backend. `VITE_API_MODE=http` talks to the real API through the
+Vite proxy - no component or hook knows the difference.
 
 The interface models the four outcomes of a question explicitly: **loading**
 (retrieving, then generating), **answered with sources**, **insufficient
 evidence**, and **error**. "Insufficient evidence" is a valid answer, not a
 failure, and is styled accordingly.
+
+## Deploying
+
+One VM, Docker Compose, Caddy for HTTPS: [docs/deploy.md](docs/deploy.md) is
+the full procedure, and [ADR-0020](docs/adr/0020-single-vm-compose-deployment.md)
+the reasoning. Images are built for x86 and ARM by the Release workflow and
+pulled by commit sha, so production runs exactly what CI built.
