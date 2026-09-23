@@ -38,12 +38,19 @@ Replace the dashes with your server's public IP.
 
 ```bash
 git clone https://github.com/MalakBenHassine/knowpilot.git && cd knowpilot
-cp .env.production.example .env.production && chmod 600 .env.production
+cp .env.production.example .env.production
+./infra/server/fill-secrets.sh
 ```
 
-Fill in `.env.production`. Generate **every** password and the client secret
-with `openssl rand -hex 32` (hex: the Redis password travels inside a URL).
-Paste the Groq key from console.groq.com/keys.
+The script generates every empty password and the client secret with
+`openssl rand -hex 32` (hex, because the Redis password travels inside a URL,
+where a `/` would have to be escaped by every reader of it), sets the file to
+mode 600, and prints nothing. Run it twice and nothing changes: a value that
+is already there is a value PostgreSQL or Keycloak may already have stored.
+
+It then lists what it deliberately did not fill, because those are decisions
+and credentials rather than random bytes - the domain, the URLs, and the Groq
+key to paste from console.groq.com/keys.
 
 ## 4. Images
 
