@@ -14,7 +14,13 @@ class Settings(BaseSettings):
     same image runs locally, in CI and in Kubernetes, with different variables.
     """
 
-    model_config = SettingsConfigDict(env_file="../.env", env_prefix="KP_", extra="ignore")
+    # env_ignore_empty: a variable set to "" means "not set", and the default
+    # below applies. docker-compose.prod.yml passes every tunable as
+    # ${KP_X:-}, so the defaults live HERE only - copying them into the
+    # compose file would give each one two sources of truth that drift apart.
+    model_config = SettingsConfigDict(
+        env_file="../.env", env_prefix="KP_", extra="ignore", env_ignore_empty=True
+    )
 
     environment: Literal["local", "ci", "production"] = "local"
     # Applies to our own loggers only; libraries stay at WARNING.
@@ -87,6 +93,10 @@ class Settings(BaseSettings):
     # answering model's daily tokens. Empty disables the check; answering
     # still works, without the "not in your documents" notice.
     groq_check_model: str = "openai/gpt-oss-20b"
+    # An explicit switch rather than "an empty model name disables it": with
+    # empty values ignored (see model_config), emptiness can no longer carry
+    # a meaning - and it was a poor carrier of one anyway.
+    subject_check_enabled: bool = True
 
     # --- LangSmith tracing (ADR-0014) ---
     # LangChain sends every run - prompt, passages, answer - to LangSmith when
@@ -179,6 +189,36 @@ class Settings(BaseSettings):
                 f"KP_DAILY_QUESTIONS_PER_SERVICE ({self.daily_questions_per_service}): "
                 "the per-user limit could never be reached"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _production_is_complete(self) -> "Settings":
+        """Refuse to run in production on a development configuration.
+
+        Every default in this file is a LOCAL default: http URLs, localhost, an
+        empty password. Each of them would start a production container that
+        seems to work and is wrong - a login redirected to localhost, a
+        database without a password, a cookie flow over plain HTTP. Failing
+        here, at startup and in the deployment log, is the difference between
+        a deployment that does not start and one that starts broken.
+        """
+        if self.environment != "production":
+            return self
+        problems = []
+        if not self.oidc_client_secret:
+            problems.append("KP_OIDC_CLIENT_SECRET is empty")
+        if not self.postgres_password:
+            problems.append("KP_POSTGRES_PASSWORD is empty")
+        for name, url in (
+            ("KP_OIDC_ISSUER", self.oidc_issuer),
+            ("KP_FRONTEND_URL", self.frontend_url),
+        ):
+            if not url.startswith("https://"):
+                problems.append(f"{name} must be an https:// URL, got {url!r}")
+        if "localhost" in self.redis_url or "@" not in self.redis_url:
+            problems.append("KP_REDIS_URL must point at the production Redis, with a password")
+        if problems:
+            raise ValueError("production configuration incomplete: " + "; ".join(problems))
         return self
 
     @field_validator("groq_api_key", "groq_model", "groq_check_model", mode="after")

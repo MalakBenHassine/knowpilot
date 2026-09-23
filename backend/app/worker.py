@@ -120,3 +120,10 @@ class WorkerSettings:
     # keeping job results for days would duplicate the truth and let the two
     # disagree.
     keep_result = 300
+    # How often the worker writes its health key to Redis, which lives
+    # interval + 1 seconds. `arq --check` - the container healthcheck - fails
+    # once the key is gone. arq's default is an HOUR, which made the check
+    # meaningless: a dead worker would have looked healthy for 59 minutes.
+    # Sixty seconds rather than five, because the key is written between jobs
+    # and a long document must not make a busy worker look dead.
+    health_check_interval = 60

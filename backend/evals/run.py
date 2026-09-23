@@ -270,11 +270,12 @@ async def main(names: list[str]) -> int:
         print(f"{RED}KP_GROQ_API_KEY is not set: nothing to evaluate.{RESET}")
         return 2
 
+    check_model = settings.groq_check_model if settings.subject_check_enabled else "off"
     print(
         f"model={settings.groq_model}  embeddings={settings.embedding_model}  "
         f"max_distance={settings.max_distance}  top_k={settings.top_k}  "
         f"keywords={settings.keyword_search_enabled}  coverage={settings.min_keyword_coverage}  "
-        f"context={settings.passage_context_enabled}  check={settings.groq_check_model or 'off'}  "
+        f"context={settings.passage_context_enabled}  check={check_model}  "
         f"today={EVAL_TODAY}"
     )
     print(f"{GREY}loading the embedding model...{RESET}")
@@ -302,7 +303,7 @@ async def main(names: list[str]) -> int:
                 ),
                 engine,
             )
-            if settings.groq_check_model
+            if settings.subject_check_enabled
             else None
         )
         try:

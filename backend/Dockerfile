@@ -100,6 +100,12 @@ COPY --chown=knowpilot:knowpilot alembic ./alembic
 COPY --chown=knowpilot:knowpilot app ./app
 COPY --chown=knowpilot:knowpilot scripts ./scripts
 
+# The mount points of the two volumes, created here and owned by the runtime
+# user. Docker initialises an EMPTY named volume from the image directory it
+# is mounted on - ownership included - so this line is what lets uid 1001
+# write uploads and model weights without the container ever running as root.
+RUN install -d -o knowpilot -g knowpilot /data/uploads /models
+
 USER knowpilot
 
 # Documentation, not a firewall rule: EXPOSE publishes nothing by itself. It

@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ),
         )
 
-        if settings.groq_check_model:
+        if settings.subject_check_enabled:
             app.state.subject_check = SubjectCheck(
                 build_advisory_chain(
                     SUBJECT_PROMPT,
