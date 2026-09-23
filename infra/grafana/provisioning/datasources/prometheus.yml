@@ -1,0 +1,17 @@
+# The data source, declared in a file rather than clicked in the interface:
+# a Grafana that loses its volume comes back identical, and what it reads is
+# reviewable in a pull request.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    uid: knowpilot-prometheus
+    isDefault: true
+    # Matches the scrape interval, so the graphs never draw a resolution the
+    # data does not have.
+    jsonData:
+      timeInterval: 15s
+    editable: false

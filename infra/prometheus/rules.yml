@@ -1,0 +1,117 @@
+# Alert rules. Each one answers a question an operator would otherwise have to
+# think to ask, and each `summary` says what to DO - an alert that only states
+# a number is a notification, not an alert.
+#
+# There is no Alertmanager yet: notifying needs a channel (SMTP, Slack) this
+# deployment does not have. The rules are still evaluated every fifteen
+# seconds and are visible in Prometheus and on the Grafana dashboard, so the
+# state is available; what is missing is the push. Adding Alertmanager is one
+# service and one secret - deliberately not done while nobody would read the
+# mail.
+
+groups:
+  - name: availability
+    rules:
+      # The two processes fail independently, so they are watched
+      # independently. This is the whole reason the worker exports metrics.
+      - alert: ApiDown
+        expr: up{job="api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The API has not answered a scrape for two minutes"
+          description: "Nobody can log in or ask a question. Check `docker compose logs api`."
+
+      - alert: WorkerDown
+        expr: up{job="worker"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The ingestion worker is gone"
+          description: >-
+            Uploads are still accepted and are piling up in Redis; every
+            document stays in `processing` with a spinner the user cannot
+            stop. Five minutes, not two: the worker loads 2.2 GB of weights at
+            start-up and a restart is not an incident.
+
+  - name: ingestion
+    rules:
+      - alert: IngestionMostlyFailing
+        expr: |
+          sum(rate(knowpilot_ingestions_total{outcome!~"indexed|gone"}[15m]))
+            /
+          sum(rate(knowpilot_ingestions_total{outcome!="gone"}[15m]))
+            > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than half of the documents are failing to index"
+          description: >-
+            Break the count down by `outcome`: `unsupported_format` and
+            `no_text_found` are users uploading scans, which is the product
+            working. `processing_error` is ours - read the worker's log.
+
+  - name: answers
+    rules:
+      # Specific to this product: the assistant refusing is a valid answer,
+      # but nearly always refusing means retrieval stopped finding anything.
+      # No error rate would ever show this.
+      - alert: AnswersMostlyRefused
+        expr: |
+          sum(rate(knowpilot_questions_total{outcome=~"refused|nothing_found"}[30m]))
+            /
+          sum(rate(knowpilot_questions_total[30m]))
+            > 0.7
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Seven questions in ten are getting no grounded answer"
+          description: >-
+            Suspect retrieval, not the model: an embedding model changed, the
+            index is empty for the users who are asking, or the distance
+            threshold is now too strict.
+
+      - alert: ProviderSaturated
+        expr: sum(rate(knowpilot_questions_total{outcome=~"busy|unavailable"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Groq has been refusing or failing for ten minutes"
+          description: >-
+            Users are seeing 503 and "the assistant is busy". Check the
+            provider's status and the daily token budget on the dashboard.
+
+  - name: latency
+    rules:
+      - alert: ServerErrors
+        expr: |
+          sum(rate(knowpilot_http_requests_total{status=~"5.."}[10m]))
+            /
+          sum(rate(knowpilot_http_requests_total[10m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "One request in twenty is failing with a 5xx"
+          description: "Break it down by `route` on the dashboard, then read the API log."
+
+      - alert: SlowAnswers
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(knowpilot_generation_duration_seconds_bucket[15m]))
+          ) > 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The slowest answers take more than twenty seconds"
+          description: >-
+            Measured from the call to the model to the final verdict, so this
+            is the provider or a very long context - not retrieval.

@@ -132,7 +132,30 @@ curl -s -o /dev/null -w "%{http_code}\n" https://$KP_DOMAIN/auth/admin/   # 404
 
 Then log in through the browser, upload a document and ask a question.
 
-## 7. Updates and rollback
+## 7. Watching it
+
+Prometheus and Grafana run with the rest of the stack, and publish on
+`127.0.0.1` only. Nothing about them is reachable from the internet, so
+reading a dashboard means bringing the port to your own machine:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 ubuntu@<the server>
+```
+
+Leave that running, then open <http://localhost:3000> and log in with
+`KP_GRAFANA_ADMIN` / `KP_GRAFANA_ADMIN_PASSWORD`. The **KnowPilot** dashboard
+is already there: it is provisioned from the repository, not created by hand.
+Prometheus itself is on <http://localhost:9090>, where
+*Status -> Targets* must show `api` and `worker` **up** - the worker is the
+one that matters, because the API can answer every request while no upload is
+being indexed at all.
+
+The alert rules are evaluated every fifteen seconds and shown under
+*Alerts*. They are **not delivered anywhere**: notifying needs a mail or chat
+channel this deployment does not have (ADR-0021). Until one exists, the
+dashboard is what an operator looks at.
+
+## 8. Updates and rollback
 
 ```bash
 # in .env.production: KP_IMAGE_TAG=<new sha>
@@ -145,7 +168,7 @@ succeeded. To roll back, set the previous sha and run `kp up -d` again. A
 migration is only rolled back by hand (`kp run --rm migrate alembic downgrade
 -1`): read it first.
 
-## 8. Backups
+## 9. Backups
 
 The state is in three volumes: `postgres_data` (documents, chunks, users),
 `uploads` (the original files) and `caddy_data` (certificates). `models` can
@@ -160,12 +183,14 @@ docker run --rm -v knowpilot-prod_uploads:/data:ro -v "$PWD":/out alpine \
 Copy both files **off the machine**: a backup on the server it protects is
 not a backup. Restore them once, on a scratch machine, before you need to.
 
-## 9. Operating
+## 10. Operating
 
 | Need | Command |
 | --- | --- |
 | Logs of one service | `kp logs -f api` |
-| Metrics (from the server) | `kp exec api python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/metrics').read().decode())"` |
+| Dashboards | the SSH tunnel of section 7 |
+| Raw metrics of the API | `kp exec api python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/metrics').read().decode())"` |
+| Raw metrics of the worker | `kp exec worker python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:9100/metrics').read().decode())"` |
 | Keycloak administration | the scripts in `infra/keycloak/`, never the web console (not exposed) |
 | Re-index every document | `kp exec api python -m scripts.reindex` |
 | Disk usage | `docker system df` |

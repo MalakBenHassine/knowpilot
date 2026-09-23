@@ -172,8 +172,9 @@ services:
     cap_drop: [ALL]
     # `backend` only: no route to the internet (see the header).
     networks: [backend]
-    # The image's healthcheck is the API's HTTP probe. The worker has no
-    # port; arq checks the health key the worker refreshes in Redis.
+    # The image's healthcheck is the API's HTTP probe. The worker serves
+    # only its metrics exporter, which says nothing about whether jobs are
+    # running; arq checks the health key the worker refreshes in Redis.
     healthcheck:
       test: ["CMD", "arq", "--check", "app.worker.WorkerSettings"]
       interval: 60s
@@ -317,8 +318,92 @@ services:
       start_period: 60s
     mem_limit: 1g
 
+  # --- Watching it ------------------------------------------------------------------
+  #
+  # Neither of these is reachable from the internet: they publish on 127.0.0.1
+  # only, so seeing a dashboard means an SSH tunnel to the server
+  # (docs/deploy.md). A monitoring stack open to the world is a map of the
+  # service handed to whoever asks for it.
+  #
+  # They are on their OWN network, not on `backend`. A port published from an
+  # internal network is unreachable even from the host - measured, not
+  # assumed - because an internal network has no route for the host to come
+  # back in on. So `observability` is an ordinary network, and these two
+  # containers can reach the internet where the worker and the database
+  # cannot. That is the trade-off, and it is a small one: by the rules of
+  # ADR-0019 these processes hold counts, durations and token totals - never
+  # the text of a question, a document or an answer. What leaks from here is
+  # arithmetic.
+
+  prometheus:
+    <<: *hardened
+    image: prom/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Fifteen days. Long enough to answer "when did this start?" after a
+      # weekend, short enough that the disk of one small VM never decides it.
+      - --storage.tsdb.retention.time=15d
+      - --web.listen-address=0.0.0.0:9090
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    # `backend` to scrape the API and the worker, `observability` to be
+    # reached from the host.
+    networks: [backend, observability]
+    read_only: true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 512m
+
+  grafana:
+    <<: *hardened
+    image: grafana/grafana:13.0.9@sha256:c26daa778ea9fd817be3fe606ba4b78ea4c217a7a27c1ba8f5faa4418ecc48dd
+    environment:
+      GF_SECURITY_ADMIN_USER: ${KP_GRAFANA_ADMIN:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${KP_GRAFANA_ADMIN_PASSWORD:?KP_GRAFANA_ADMIN_PASSWORD is required}
+      # One account, created here. Nobody signs up for the dashboard of a
+      # service that has one operator.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # No call home and no update check: this network has no route out, so
+      # both would only fill the log with failures.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # Read-only: the data source and the dashboards come from the
+      # repository. Grafana may not rewrite them, and a lost volume brings
+      # back exactly the same screens.
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    # Grafana talks to Prometheus and to nothing else in the stack, so it
+    # never joins `backend`.
+    networks: [observability]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    mem_limit: 384m
+
 networks:
   edge: {}
+  observability: {}
   backend:
     # No gateway to the outside world. Containers here reach each other and
     # nothing else.
@@ -332,3 +417,5 @@ volumes:
   uploads:
   caddy_data:
   caddy_config:
+  prometheus_data:
+  grafana_data:
