@@ -119,8 +119,11 @@ would have:
 
 ## Consequences
 
-- The claim in ADR-0020 is now backed by 31 objects that assemble, validate
-  and pass a configuration scan, rather than by a sentence.
+- The claim in ADR-0020 is now backed by 32 objects, rather than by a
+  sentence. They assemble, they pass a strict schema validation - 31 of them
+  against the catalogue, the Traefik `Middleware` being a CRD whose schema
+  lives in the cluster and is skipped - and a configuration scan with no
+  HIGH or CRITICAL finding.
 - `ReadWriteOnce` on the shared volumes is a **real** limit, not an oversight.
   On one node the API, the worker and the Jobs mount the same claim happily.
   On a second node they would not: that day needs ReadWriteMany (NFS, EFS,
