@@ -146,6 +146,22 @@ The interface models the four outcomes of a question explicitly: **loading**
 evidence**, and **error**. "Insufficient evidence" is a valid answer, not a
 failure, and is styled accordingly.
 
+## Measuring it
+
+```bash
+cd backend
+uv run python -m perf.seed 50000 --vocabulary 20000   # a synthetic corpus
+uv run python -m perf.retrieval --corpus 50000        # the read path, layer by layer
+uv run python -m perf.ingestion --pages 20            # the write path
+k6 run perf/api.js                                    # the HTTP layer at 100 clients
+```
+
+The numbers, the machine they came from and what they imply are in
+[docs/performance.md](docs/performance.md). Two of them matter more than the
+rest: the vector search is **flat** from 1 000 to 50 000 passages, and
+indexing runs at **0.25 pages per second** on a laptop CPU - which is how
+the page limit and the job timeout were found to contradict each other.
+
 ## Quality and security checks
 
 Every pull request runs these, and each one blocks the merge:

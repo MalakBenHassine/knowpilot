@@ -43,6 +43,12 @@ select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
 # S101: assert is the whole point of a test file.
 # S105: fake tokens in fixtures are not hardcoded credentials.
 "tests/*" = ["S101", "S105"]
+# S311: the benchmark corpus is generated from a SEEDED generator, so two
+#       runs measure the same data. Reproducibility is the requirement
+#       here; unpredictability would defeat it.
+# S108: a storage path written into a row and never opened - the benchmark
+#       inserts chunks directly and touches no file.
+"perf/*" = ["S311", "S108"]
 
 [tool.mypy]
 python_version = "3.12"
