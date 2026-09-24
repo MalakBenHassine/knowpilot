@@ -23,6 +23,24 @@ concurrency:
 jobs:
   sonar:
     name: SonarQube Cloud
+    # Not on a dependency bump. Two reasons, and either one is enough.
+    #
+    # A run triggered by dependabot[bot] cannot read repository secrets -
+    # GitHub keeps a separate store for them - so SONAR_TOKEN is empty and
+    # the scan fails for a reason that has nothing to do with quality. That
+    # is how all five open dependency PRs came to show a red check while
+    # every step before it, coverage included, had passed.
+    #
+    # And a bump changes a version string in a manifest, not analysable
+    # source: Sonar would re-grade identical code and publish identical
+    # measures. What does say something about a bump - Backend, Frontend,
+    # Security and CodeQL - still runs on every one of them.
+    #
+    # The restriction follows the actor, not the event, so a push whose
+    # author is the bot - a Dependabot auto-merge - is skipped here too.
+    # Harmless: Sonar's main-branch state is a snapshot of the whole
+    # project, so the next human push re-establishes it in full.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Coverage is only meaningful if the database tests run: they cover tenant
