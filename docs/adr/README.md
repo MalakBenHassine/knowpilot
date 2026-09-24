@@ -30,6 +30,7 @@ decisions is as useful as the decisions themselves.
 | [0019](0019-prometheus-metrics.md) | Prometheus metrics, on an endpoint the internet cannot reach | Accepted |
 | [0020](0020-single-vm-compose-deployment.md) | Deploy on one VM with Docker Compose, behind Caddy | Accepted |
 | [0021](0021-monitoring-stack.md) | Prometheus and Grafana on the same VM, reachable only through SSH | Accepted |
+| [0022](0022-kubernetes-manifests.md) | Kubernetes manifests for a local cluster, while production stays on Compose | Accepted |
 
 ## Template
 

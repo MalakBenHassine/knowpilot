@@ -1,0 +1,55 @@
+# One host, three paths - the same single origin the `__Host-` session cookie
+# requires (ADR-0004), and the same routing Caddy does in the Compose stack.
+#
+# What is NOT routed matters as much as what is. The API's /metrics lives
+# outside /api on purpose, so only `/api` being routed here is what keeps it
+# off the internet. Nothing to configure, nothing to forget.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: block-keycloak-admin
+spec:
+  # Traefik-specific, and deliberately so: k3s ships Traefik, and the
+  # alternative - routing the admin console and trusting a password - is not
+  # one. On another ingress controller this becomes its own equivalent
+  # (nginx: a `location` returning 404; Gateway API: a filter).
+  #
+  # The admin console and the master realm are not administered through a
+  # browser here: the scripts in infra/keycloak/ do it over the cluster
+  # network, where they can be read and reviewed.
+  replacePathRegex:
+    regex: ^/auth/(admin|realms/master)(/.*)?$
+    replacement: /auth/nonexistent
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: knowpilot
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: knowpilot-block-keycloak-admin@kubernetescrd
+spec:
+  rules:
+    - host: knowpilot.localhost
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  name: http
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  name: http

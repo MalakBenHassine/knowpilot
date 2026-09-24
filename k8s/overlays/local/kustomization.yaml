@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: knowpilot
+
+resources:
+  - ../../base
+
+# The secrets. Generated from a file that is git-ignored, so nothing secret
+# ever reaches the repository - see secrets.env.example.
+#
+# The generated name carries a hash of the contents, and Kustomize rewrites
+# every reference to it. Changing a password therefore changes the pod spec,
+# and Kubernetes rolls the pods that use it. Without the hash, a secret could
+# change while the pods kept serving the old value for weeks.
+secretGenerator:
+  - name: knowpilot-secrets
+    envs:
+      - secrets.env
+
+# Images built locally and imported into the cluster with
+#   k3d image import knowpilot-backend:dev -c knowpilot
+# rather than pulled: the backend image is 2.5 GB, and a registry round trip
+# for every change is a minute nobody spends twice.
+images:
+  - name: knowpilot-backend
+    newTag: dev
+  - name: knowpilot-frontend
+    newTag: dev
+  - name: knowpilot-keycloak
+    newTag: dev
+
+# One node, and a laptop that also runs a browser and an editor. The requests
+# in the base reserve what the two 2.2 GB models need; here they are lowered
+# so the scheduler accepts both pods on the single node, while the LIMITS are
+# left alone - the protection against a runaway process stays.
+patches:
+  - path: smaller-requests.yaml
+    target:
+      kind: Deployment
+      name: api
+  - path: smaller-requests.yaml
+    target:
+      kind: Deployment
+      name: worker

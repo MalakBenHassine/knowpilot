@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: knowpilot
+
+# Applied to every object, so one label selector shows the whole
+# application and nothing else.
+#
+# includeSelectors is false on purpose. A Deployment's selector is
+# immutable: once a label is inside it, adding or renaming one means
+# deleting the Deployment to change it. Labels that describe are not
+# labels that select.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: knowpilot
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - postgres-init.yaml
+  - storage.yaml
+  - postgres.yaml
+  - redis.yaml
+  - jobs.yaml
+  - api.yaml
+  - worker.yaml
+  - frontend-keycloak.yaml
+  - ingress.yaml
+  - networkpolicies.yaml
+
+# The images every overlay overrides. The tags here are deliberately
+# unusable: a manifest applied without an overlay must fail to pull rather
+# than quietly run whatever `latest` happens to be today.
+images:
+  - name: knowpilot-backend
+    newTag: local
+  - name: knowpilot-frontend
+    newTag: local
+  - name: knowpilot-keycloak
+    newTag: local

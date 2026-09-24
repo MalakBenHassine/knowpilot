@@ -1,0 +1,177 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # This is where the Compose `depends_on` went. Two waits, not one
+      # `alembic upgrade head` per pod: two pods migrating the same database
+      # at the same time is a race nobody wants to debug, and the migration
+      # already ran once, in its Job.
+      initContainers:
+        - name: wait-for-model
+          image: knowpilot-backend:local
+          command:
+            - sh
+            - -c
+            - until [ -f /models/.ready ]; do echo "waiting for the weights"; sleep 5; done
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+        - name: wait-for-migrations
+          image: knowpilot-backend:local
+          # Compares the revision the database is at with the newest revision
+          # in the image. No RBAC, no reading the Job's status: the question
+          # "is the schema current?" is answered by the schema itself.
+          command:
+            - sh
+            - -c
+            - |
+              until [ "$(alembic current 2>/dev/null | head -1 | cut -d' ' -f1)" \
+                    = "$(alembic heads | head -1 | cut -d' ' -f1)" ]; do
+                echo "waiting for the migration Job"
+                sleep 3
+              done
+          envFrom:
+            - configMapRef:
+                name: knowpilot-config
+            - secretRef:
+                name: knowpilot-secrets
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      containers:
+        - name: api
+          image: knowpilot-backend:local
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: knowpilot-config
+            - secretRef:
+                name: knowpilot-secrets
+          # Kubernetes expands $(VAR) in an env value from the entries
+          # DEFINED BEFORE IT in this same list. So the URL is composed
+          # here, from the secret, and the password is never copied by
+          # hand into a second place where the two could drift apart.
+          env:
+            - name: KP_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowpilot-secrets
+                  key: KP_REDIS_PASSWORD
+            - name: KP_REDIS_URL
+              value: redis://:$(KP_REDIS_PASSWORD)@redis:6379/0
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: uploads
+              mountPath: /data/uploads
+            - name: tmp
+              mountPath: /tmp
+          # The three probes Compose could not express, each with its own job.
+          #
+          # startup: the embedding model takes about twenty seconds to load.
+          # Until this passes, the other two are not even evaluated - which is
+          # what stops a slow start from being read as a crash loop.
+          startupProbe:
+            httpGet:
+              path: /api/health/live
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          # liveness: is the process alive? It checks NOTHING else on purpose.
+          # A liveness probe that tested the database would restart a healthy
+          # API every time PostgreSQL hiccupped, turning one outage into two.
+          livenessProbe:
+            httpGet:
+              path: /api/health/live
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          # readiness: are the dependencies reachable? A failure takes this pod
+          # out of the Service - no traffic, no restart.
+          readinessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            # The request is what the scheduler reserves, and it has to cover
+            # the 2.2 GB of weights: a pod scheduled on a node that cannot
+            # hold them is a pod that is killed while loading them.
+            requests:
+              cpu: 250m
+              memory: 2560Mi
+            limits:
+              # No CPU limit. Throttling an event loop adds latency to every
+              # request to save a resource nobody else is asking for; the
+              # request above is what protects the node.
+              memory: 3584Mi
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads
+        - name: tmp
+          emptyDir: {}

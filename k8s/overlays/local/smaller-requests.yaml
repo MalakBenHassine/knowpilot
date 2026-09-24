@@ -1,0 +1,9 @@
+# A JSON patch rather than a strategic merge: it names the exact field, so it
+# cannot silently drop the limits or the rest of the container spec the way a
+# merge on a list can.
+- op: replace
+  path: /spec/template/spec/containers/0/resources/requests/memory
+  value: 1Gi
+- op: replace
+  path: /spec/template/spec/containers/0/resources/requests/cpu
+  value: 100m

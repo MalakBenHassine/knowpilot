@@ -216,3 +216,11 @@ the reasoning. Images are built for x86 and ARM by the Release workflow, which
 runs on a **version tag** and not on every commit: publishing is a decision,
 not a side effect of merging. They are pulled by commit sha, so production
 runs exactly what CI built - and their signature says so.
+
+The same system also exists as Kubernetes objects, in [k8s/](k8s/): one
+Kustomize base, a local overlay, and a script that **proves** the
+NetworkPolicies by opening connections from inside the cluster - because a
+policy applies cleanly and blocks nothing on a CNI that ignores them.
+Production stays on Compose, and
+[ADR-0022](docs/adr/0022-kubernetes-manifests.md) says why, including the
+one thing Compose expresses that Kubernetes has no equivalent for.

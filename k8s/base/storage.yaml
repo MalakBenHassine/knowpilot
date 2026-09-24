@@ -1,0 +1,29 @@
+# The two volumes the application shares between pods.
+#
+# ReadWriteOnce, and that is a REAL limit, not an oversight: on one node the
+# API, the worker and the Jobs all mount the same claim happily, because they
+# land on the same machine. On a second node they would not. Moving past one
+# node means either ReadWriteMany (NFS, EFS, Longhorn) or, for the weights,
+# baking them into the image and paying 2.2 GB per pull instead. That choice
+# belongs to the day a second node exists, and is recorded in ADR-0022.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # BGE-M3 is 2.2 GB; the rest is room for a model change without a
+      # resize.
+      storage: 6Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uploads
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi

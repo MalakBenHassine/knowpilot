@@ -1,0 +1,144 @@
+# The ingestion worker. No Service for the application - nothing calls it,
+# it pulls its work from Redis - but a Service for its metrics, so Prometheus
+# has a stable name to scrape.
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-metrics
+  labels:
+    app.kubernetes.io/name: worker
+spec:
+  selector:
+    app.kubernetes.io/name: worker
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate. A rolling update would start the new worker
+  # while the old one still holds the models volume - ReadWriteOnce, so the
+  # new pod would wait for a volume that is not free until the old pod exits.
+  # The deployment would sit there, half done, looking stuck.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-model
+          image: knowpilot-backend:local
+          command:
+            - sh
+            - -c
+            - until [ -f /models/.ready ]; do echo "waiting for the weights"; sleep 5; done
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+      containers:
+        - name: worker
+          image: knowpilot-backend:local
+          command: ["arq", "app.worker.WorkerSettings"]
+          ports:
+            - name: metrics
+              containerPort: 9100
+          envFrom:
+            - configMapRef:
+                name: knowpilot-config
+            - secretRef:
+                name: knowpilot-secrets
+          # Kubernetes expands $(VAR) in an env value from the entries
+          # DEFINED BEFORE IT in this same list. So the URL is composed
+          # here, from the secret, and the password is never copied by
+          # hand into a second place where the two could drift apart.
+          env:
+            - name: KP_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowpilot-secrets
+                  key: KP_REDIS_PASSWORD
+            - name: KP_REDIS_URL
+              value: redis://:$(KP_REDIS_PASSWORD)@redis:6379/0
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: uploads
+              mountPath: /data/uploads
+            - name: tmp
+              mountPath: /tmp
+          # The metrics port answers as soon as the process starts, before the
+          # weights are loaded - deliberately, so a scrape during start-up
+          # finds a live process rather than a refused connection. That makes
+          # it a bad liveness probe, so liveness asks arq instead: it checks
+          # the health key the worker refreshes in Redis, which is the only
+          # thing that says jobs are actually being drained.
+          #
+          # timeoutSeconds is not decoration here. `arq --check` is not a
+          # request to a running server: it starts a Python interpreter that
+          # imports the application - torch included - and then reads a key
+          # in Redis. Measured at about seven seconds. The default timeout
+          # for a probe is ONE, so without this the check never finished
+          # once, and the worker sat at 0/1 for a quarter of an hour while
+          # its own log said it was ready.
+          startupProbe:
+            exec:
+              command: ["arq", "--check", "app.worker.WorkerSettings"]
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command: ["arq", "--check", "app.worker.WorkerSettings"]
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 2560Mi
+            limits:
+              memory: 3584Mi
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads
+        - name: tmp
+          emptyDir: {}

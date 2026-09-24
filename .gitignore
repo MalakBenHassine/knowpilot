@@ -30,6 +30,9 @@ __pycache__/
 coverage.xml
 htmlcov/
 
+# === Secrets Kubernetes: generes localement, jamais versionnes ===
+k8s/overlays/*/secrets.env
+
 # === Analyse qualité (SonarScanner) ===
 .scannerwork/
 

@@ -1,0 +1,155 @@
+# The two one-shot steps of the Compose stack, as Jobs.
+#
+# Compose expressed the order with `service_completed_successfully`: the API
+# would not start until these had exited 0. KUBERNETES HAS NO SUCH THING - a
+# Deployment never looks at a Job. The order is rebuilt in the Deployments
+# themselves, by initContainers that wait for what these Jobs produce
+# (k8s/base/api.yaml). That is the one part of the Compose file which does
+# not translate.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model
+spec:
+  # If it dies twice, something is wrong with the network or the volume, and
+  # a third attempt would only download 2.2 GB again.
+  backoffLimit: 2
+  # Swept an hour after it finishes, so `kubectl get jobs` shows what is
+  # happening now rather than a museum of past deployments.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: model
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model
+          image: knowpilot-backend:local
+          # The marker is what the API and the worker wait for. Written only
+          # after the script has checked the dimensions of what it downloaded,
+          # so a truncated download never looks finished.
+          command:
+            - sh
+            - -c
+            - python -m scripts.fetch_model && touch /models/.ready
+          env:
+            - name: KP_EMBEDDING_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: knowpilot-config
+                  key: KP_EMBEDDING_MODEL
+            - name: KP_EMBEDDING_CACHE_DIR
+              value: /models
+            - name: DISABLE_SAFETENSORS_CONVERSION
+              value: "1"
+            # huggingface_hub writes more than the weights: a lock file, a
+            # staging directory for the chunked downloader, metadata. All of
+            # it defaults to $HOME/.cache, which is on a read-only root
+            # filesystem here - the Compose version of this job never hit it,
+            # because its root filesystem was writable. Pointing HF_HOME at
+            # the volume keeps the whole cache in one place, where a second
+            # run finds what the first one downloaded.
+            - name: HF_HOME
+              value: /models/.huggingface
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              memory: 3Gi
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      # Compose held this back with `depends_on: postgres: service_healthy`.
+      # A Job has no such thing: it starts the moment it is created, which on
+      # a fresh cluster is before PostgreSQL exists. Three attempts, three
+      # name resolution failures, and the Job was exhausted in sixty seconds.
+      initContainers:
+        - name: wait-for-postgres
+          image: knowpilot-backend:local
+          command:
+            - sh
+            - -c
+            - |
+              until python -c "import socket; socket.create_connection(('postgres', 5432), 2)" 2>/dev/null; do
+                echo "waiting for postgres"
+                sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+      containers:
+        - name: migrate
+          image: knowpilot-backend:local
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: knowpilot-config
+            - secretRef:
+                name: knowpilot-secrets
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

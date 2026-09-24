@@ -1,0 +1,140 @@
+# PostgreSQL with pgvector. A StatefulSet, not a Deployment: a database has
+# an identity and a volume that must follow it, and a rolling update that
+# started a second pod against the same data would corrupt it. A StatefulSet
+# stops the old pod before it starts the new one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  # Headless: the StatefulSet gives the pod a stable DNS name, and nothing
+  # here needs load balancing across replicas that do not exist.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        # The volume is created owned by this group, so the database can write
+        # to it without the container ever being root.
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: knowpilot-config
+                  key: KP_POSTGRES_USER
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: knowpilot-config
+                  key: KP_POSTGRES_DB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowpilot-secrets
+                  key: KP_POSTGRES_PASSWORD
+            # The data directory is a subdirectory of the mount, not the mount
+            # itself: a volume plugin that leaves a lost+found behind makes
+            # initdb refuse to start on an "already populated" directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # Read by the init scripts below, and by nothing else.
+            - name: KP_KEYCLOAK_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: knowpilot-config
+                  key: KP_KEYCLOAK_DB
+            - name: KP_KEYCLOAK_DB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: knowpilot-config
+                  key: KP_KEYCLOAK_DB_USER
+            - name: KP_KEYCLOAK_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowpilot-secrets
+                  key: KP_KEYCLOAK_DB_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+            # What the Compose stack bind-mounts from infra/postgres/init/.
+            # The entrypoint runs everything here once, and only on an empty
+            # data directory - so changing a script means recreating the
+            # volume, in Kubernetes exactly as in Compose.
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          # Readiness, not liveness: a database busy replaying WAL after a
+          # crash is not answering, and restarting it would make it start the
+          # replay again, for ever.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "knowpilot", "-d", "knowpilot"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: postgres-init
+            # Executable, so the entrypoint runs each script as its own
+            # process. Left at 0644 it would SOURCE them instead, and their
+            # `set -euo pipefail` would apply to the entrypoint itself.
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 8Gi

@@ -44,6 +44,10 @@ repos:
         args: [--maxkb=1024]
       - id: check-merge-conflict
       - id: check-yaml
+        # Les manifests Kubernetes regroupent plusieurs objets dans un
+        # meme fichier, separes par ---. Sans cette option le hook
+        # s'arrete au deuxieme document.
+        args: [--allow-multiple-documents]
       - id: check-json
         # Les fichiers tsconfig sont du JSONC (JSON avec commentaires) : exclus.
         exclude: ^frontend/tsconfig.*\.json$

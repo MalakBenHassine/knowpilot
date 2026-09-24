@@ -1,0 +1,68 @@
+name: Kubernetes
+
+# The manifests are code, and untested code rots. Three checks, each catching
+# a different class of mistake:
+#
+#   kustomize build  - does it even assemble? A missing file or a patch whose
+#                      target no longer exists fails here.
+#   kubeconform      - is every object valid against the Kubernetes schemas?
+#                      A misspelled field is accepted by YAML and silently
+#                      ignored by the API server.
+#   trivy config     - does it grant more than it needs? Root, privilege
+#                      escalation, a missing securityContext.
+#
+# What CI cannot check is whether the NetworkPolicies are ENFORCED: that
+# depends on the cluster's CNI, and is proved by k8s/test-isolation.sh
+# against a real k3d cluster (ADR-0022).
+
+on:
+  pull_request:
+    paths:
+      - "k8s/**"
+      - ".github/workflows/kubernetes.yml"
+  push:
+    branches: [main]
+    paths:
+      - "k8s/**"
+      - ".github/workflows/kubernetes.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The base, not an overlay: an overlay needs a secrets file that is
+      # git-ignored and must never exist on a runner.
+      - name: Assemble
+        run: kubectl kustomize k8s/base > rendered.yaml
+
+      # -strict rejects a field the schema does not define, which is the
+      # whole point: `readinessProbe: {httpGett: ...}` is valid YAML and does
+      # nothing at all. --ignore-missing-schemas skips the Traefik Middleware,
+      # a CRD whose schema lives in the cluster rather than in the catalogue.
+      - name: Validate against the Kubernetes schemas
+        run: |
+          docker run --rm -v "$PWD:/work" \
+            ghcr.io/yannh/kubeconform@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e \
+            -strict -summary -ignore-missing-schemas /work/rendered.yaml
+
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: rendered.yaml
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Lint the isolation test
+        run: |
+          docker run --rm -v "$PWD:/mnt" \
+            koalaman/shellcheck:stable /mnt/k8s/test-isolation.sh
