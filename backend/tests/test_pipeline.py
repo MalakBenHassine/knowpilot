@@ -12,12 +12,19 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from prometheus_client import REGISTRY
 
 from app.db.models import EMBEDDING_DIMENSIONS
-from app.rag.pipeline import StoredFile, ingest_document
+from app.rag.pipeline import (
+    MAX_INGESTION_SECONDS,
+    SECONDS_PER_PAGE,
+    StoredFile,
+    affordable_pages,
+    ingest_document,
+)
 from tests.fakes import fake_embeddings
 
 DOCUMENT_ID = uuid.uuid4()
@@ -238,3 +245,44 @@ def test_a_slow_failure_is_timed_like_a_success(tmp_path: Path) -> None:
     run(store, ExplodingEmbeddings())
 
     assert measured() == timed + 1
+
+
+# --- The time budget --------------------------------------------------------
+#
+# MAX_PAGES guards memory while the file is read. This one guards TIME, and
+# it can only be decided once the page count is known. The two were measured
+# against each other only after docs/performance.md existed: the parser used
+# to accept 500 pages, which at 0.25 pages/s needed 2000 s against a job
+# timeout of 600.
+
+
+def test_the_budget_is_what_the_worker_allows() -> None:
+    """The refusal and the job timeout must not be able to disagree."""
+    from app.worker import JOB_TIMEOUT_SECONDS
+
+    # Every document that is accepted fits inside the budget...
+    assert affordable_pages() * SECONDS_PER_PAGE <= MAX_INGESTION_SECONDS
+    # ...and the budget fits inside the timeout, with room to spare. If this
+    # ever fails, a document is being killed instead of refused, and the user
+    # sees a retry button that can never work.
+    assert MAX_INGESTION_SECONDS < JOB_TIMEOUT_SECONDS
+
+
+def test_a_document_too_long_to_index_is_refused_before_the_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refused in seconds, with a reason - not killed after half an hour."""
+    # One page per line is what the plain-text loader produces, so a low
+    # ceiling makes a small file exceed it.
+    monkeypatch.setattr("app.rag.pipeline.MAX_INGESTION_SECONDS", 5)
+    monkeypatch.setattr("app.rag.pipeline.SECONDS_PER_PAGE", 6)
+
+    store = FakeStore(write_note(tmp_path))
+    run(store)
+
+    # too_large, not processing_error: the document is beyond what this
+    # deployment can index, and no retry will change that.
+    assert store.failure == ("too_large", False)
+    # Nothing was embedded: the point of deciding early is to spend nothing.
+    assert store.result is None
+    assert "embedding" not in store.stages

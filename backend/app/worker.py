@@ -27,7 +27,7 @@ from app.core.tracing import ensure_tracing_is_deliberate
 from app.db.ingestion import DatabaseIngestionStore
 from app.db.session import create_engine, create_session_factory
 from app.db.vector_store import create_vector_store, load_checked_embeddings
-from app.rag.pipeline import ingest_document
+from app.rag.pipeline import MAX_INGESTION_SECONDS, ingest_document
 
 if TYPE_CHECKING:
     from arq.typing import WorkerCoroutine
@@ -43,10 +43,18 @@ configure_logging(settings.log_level)
 # helps when tasks wait; these do not.
 MAX_CONCURRENT_JOBS = 1
 
-# Ten minutes, derived rather than guessed: the ceiling is 500 pages, OCR is
-# capped at 30 of them, and embedding a long document is measured in tens of
-# seconds. A job that exceeds this is stuck, not slow.
-JOB_TIMEOUT_SECONDS = 600
+# The net, not the rule. The pipeline refuses a document it cannot index
+# inside MAX_INGESTION_SECONDS before it starts (app/rag/pipeline.py), so a
+# job that reaches THIS limit is stuck somewhere unforeseen rather than
+# merely slow. Five minutes above the budget, so the two never race: the
+# inner decision always wins, and the user gets a written reason instead of
+# a killed job that retries and is killed again.
+#
+# It used to be a flat 600s while the parser accepted 500 pages - which at
+# the measured 0.25 pages/s needed 2000s. Every document above roughly 150
+# pages was accepted, indexed for ten minutes, killed, retried once and
+# killed again (docs/performance.md).
+JOB_TIMEOUT_SECONDS = MAX_INGESTION_SECONDS + 300
 
 # Retried by arq if the worker dies mid-job, which is exactly the loss the
 # queue exists to prevent. Expected failures never reach this: the pipeline

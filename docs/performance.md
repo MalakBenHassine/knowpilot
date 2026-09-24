@@ -143,15 +143,37 @@ retried once by `max_tries = 2`, and killed again. The user sees
 `processing_error`, marked retryable, for ever.
 
 The two constants were each reasonable on their own and were never measured
-against each other. Three ways out, and the choice is a product decision:
+against each other.
 
-1. **Lower `MAX_PAGES`** to what the timeout allows on the target hardware -
-   honest, and refuses the document immediately with a message instead of
-   after twenty minutes.
-2. **Raise `JOB_TIMEOUT_SECONDS`** to cover 500 pages - but then a genuinely
-   stuck job also holds the worker for half an hour.
-3. **Make the timeout a function of the page count**, read after parsing.
-   More code, and the only option that keeps both promises.
+### How it was fixed
+
+The budget is now derived from the measurement, and spent **before** the work:
+
+```python
+MAX_INGESTION_SECONDS = 1800   # what this deployment will spend on one document
+SECONDS_PER_PAGE = 6           # measured 4 s/page; margin for a slower machine
+```
+
+Once parsing has produced the page count, `ingest_document` refuses anything
+that would not fit - `too_large`, not retryable, in seconds - and nothing is
+embedded. `JOB_TIMEOUT_SECONDS` is now `MAX_INGESTION_SECONDS + 300`, so the
+two can no longer disagree: the inner decision always wins, and a job that
+reaches arq's limit is stuck somewhere unforeseen rather than merely slow. A
+test asserts that ordering, so the pair cannot drift apart again.
+
+**Why a check before the work rather than a deadline around it.**
+`aembed_documents` hands one blocking call to a worker thread, and a cancel
+scope cannot interrupt a thread already inside torch: a deadline would not
+fire until the work it guards had finished. Once the page count is known the
+cost is predictable, so the decision is taken while it can still be acted on.
+Refusing in two seconds is a better answer than killing after thirty minutes.
+
+**What it costs.** On this hardware the ceiling is 300 pages rather than the
+500 the parser allows, and `MAX_PAGES` goes back to being what it always
+was - a guard on memory, checked while the file is read, not a promise about
+time. A deployment on faster hardware lowers `SECONDS_PER_PAGE` and gets its
+pages back; there is one number to calibrate, and this page is how to
+calibrate it.
 
 ## What is not measured here
 
@@ -168,8 +190,8 @@ against each other. Three ways out, and the choice is a product decision:
 
 In the order it would actually happen:
 
-1. **Indexing long documents**, today, on this hardware - the contradiction
-   above.
+1. ~~Indexing long documents~~ - fixed above; the ceiling is now derived from
+   the measurement rather than guessed.
 2. **The keyword search on a repetitive corpus**, as soon as one user uploads
    a few hundred near-identical documents.
 3. **The connection pool**, under real concurrency on one uvicorn worker - the

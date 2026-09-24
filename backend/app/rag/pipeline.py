@@ -43,6 +43,30 @@ logger = logging.getLogger(__name__)
 # Exception -> (failure_reason, retryable). Only the backend can judge whether
 # a second attempt has any chance: a scanned page will never become readable,
 # while a full disk or a dropped connection might well clear by itself.
+# How long this deployment is willing to spend indexing ONE document, and
+# what a page costs. Measured at 0.25 pages/s on a laptop CPU
+# (docs/performance.md); six seconds leaves room for a slower machine.
+#
+# The check happens BEFORE the embedding starts, not as a deadline around
+# it, and that is deliberate: `aembed_documents` hands one blocking call to
+# a worker thread, and a cancel scope cannot interrupt a thread that is
+# already inside torch. A timeout that cannot fire until the work it guards
+# has finished is decoration. Once the page count is known, the cost is
+# predictable, so the decision is taken while it can still be acted on -
+# in seconds, with a reason, instead of half an hour later with a killed job.
+#
+# arq's own timeout (app/worker.py) sits ABOVE this on purpose: it is the
+# net for a job that hangs somewhere unforeseen, never the thing that stops
+# a document we could have refused.
+MAX_INGESTION_SECONDS = 1800
+SECONDS_PER_PAGE = 6
+
+
+def affordable_pages() -> int:
+    """The most pages this deployment can index inside its own budget."""
+    return MAX_INGESTION_SECONDS // SECONDS_PER_PAGE
+
+
 FAILURES: tuple[tuple[type[ParsingError], str, bool], ...] = (
     (UnsupportedFormatError, "unsupported_format", False),
     (NoTextFoundError, "no_text_found", False),
@@ -120,6 +144,16 @@ async def ingest_document(
 
         # The stage is written before each step, not after: the user sees what
         # is happening now, not what has just finished.
+        # MAX_PAGES (app/rag/parsing.py) is a guard on MEMORY, checked while
+        # the file is read. This one is a guard on TIME, and it can only be
+        # checked here, where the page count is finally known.
+        if len(pages) > affordable_pages():
+            raise DocumentTooLargeError(
+                f"{len(pages)} pages would need about "
+                f"{len(pages) * SECONDS_PER_PAGE}s to index, and this "
+                f"deployment allows {MAX_INGESTION_SECONDS}s per document"
+            )
+
         await store.set_stage(document_id, "chunking")
         chunks = await anyio.to_thread.run_sync(split_pages, pages)
         if not chunks:
