@@ -11,16 +11,25 @@ Free, Ampere A1**: up to 4 ARM cores and 24 GB of RAM. The images are built
 for ARM and x86 alike.
 
 - Ubuntu 24.04, 4 OCPU / 24 GB, a 100 GB boot volume.
-- Open **TCP 80 and 443** (and UDP 443 for HTTP/3) in the cloud firewall, and
-  nothing else except SSH. On Oracle, that is both the VCN security list AND
-  the instance firewall:
+- Open **TCP 80 and 443** (and UDP 443 for HTTP/3) in the **cloud** firewall,
+  and nothing else except SSH. On Oracle that is the VCN security list, and no
+  script on the instance can do it for you.
+- Then harden the machine itself:
   ```bash
-  sudo iptables -I INPUT 6 -p tcp -m multiport --dports 80,443 -j ACCEPT
-  sudo iptables -I INPUT 6 -p udp --dport 443 -j ACCEPT
-  sudo netfilter-persistent save
+  sudo ./infra/server/harden.sh
   ```
-- SSH with a key only (`PasswordAuthentication no`), and unattended security
-  updates: `sudo apt install unattended-upgrades`.
+  A firewall that denies by default, SSH keys only, fail2ban on the SSH port
+  and automatic security updates. It is idempotent, and it **refuses to
+  disable password authentication if no `authorized_keys` exists anywhere** -
+  on a cloud instance with no console, that mistake has no way back.
+
+  It also puts Docker back under the firewall. Docker writes its own iptables
+  rules and published ports bypass ufw entirely, so `ufw deny 5432` is obeyed
+  by everything except the container that published 5432. The script routes
+  Docker's `DOCKER-USER` chain through ufw. KnowPilot does not depend on that
+  - `docker-compose.prod.yml` publishes only Caddy, and binds Prometheus and
+  Grafana to `127.0.0.1` - but the day somebody adds a `ports:` in a hurry,
+  the firewall is already the one deciding.
 - Docker Engine with the Compose plugin, from Docker's own repository
   (docs.docker.com/engine/install/ubuntu). Add your user to the `docker`
   group, then log out and back in.

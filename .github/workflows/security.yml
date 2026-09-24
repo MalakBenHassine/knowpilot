@@ -35,6 +35,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Every shell script in the repository, in one place. These run as root on
+  # a server (infra/server/), against a production stack (infra/keycloak/) or
+  # against a cluster (k8s/): an unquoted variable in one of them is not a
+  # style problem.
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: shellcheck
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          printf '  %s\n' "${scripts[@]}"
+          docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:stable "${scripts[@]/#//mnt/}"
+
   vulnerabilities:
     name: Dependencies and IaC
     runs-on: ubuntu-latest

@@ -61,8 +61,3 @@ jobs:
           scan-ref: rendered.yaml
           severity: HIGH,CRITICAL
           exit-code: "1"
-
-      - name: Lint the isolation test
-        run: |
-          docker run --rm -v "$PWD:/mnt" \
-            koalaman/shellcheck:stable /mnt/k8s/test-isolation.sh

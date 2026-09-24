@@ -233,6 +233,14 @@ runs on a **version tag** and not on every commit: publishing is a decision,
 not a side effect of merging. They are pulled by commit sha, so production
 runs exactly what CI built - and their signature says so.
 
+The host it runs on is hardened by
+[infra/server/harden.sh](infra/server/harden.sh): deny-by-default firewall,
+SSH keys only, fail2ban, automatic security updates - and Docker put back
+**under** the firewall, because published ports bypass ufw entirely. It
+refuses to disable password authentication when no key is installed
+anywhere, which on a cloud instance with no console is a mistake with no
+way back.
+
 The same system also exists as Kubernetes objects, in [k8s/](k8s/): one
 Kustomize base, a local overlay, and a script that **proves** the
 NetworkPolicies by opening connections from inside the cluster - because a
