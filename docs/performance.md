@@ -175,6 +175,38 @@ time. A deployment on faster hardware lowers `SECONDS_PER_PAGE` and gets its
 pages back; there is one number to calibrate, and this page is how to
 calibrate it.
 
+## The upload path: writing the bytes to disk
+
+`FileStorage.save()` wrote with `pathlib.Path.open()` inside an `async def`.
+The comment beside it argued that a 64 KB write lands in the page cache and
+returns in microseconds - true, and beside the point. A monitor coroutine
+ticking every millisecond while a 20 MB upload is written says what the
+argument missed:
+
+| | Write time | Times the loop ran during it | Longest stall |
+| --- | --- | --- | --- |
+| Blocking `Path.open()` | 23 ms | **1** | **32 ms** |
+| `anyio.open_file()` | 49 ms | 46 | 7 ms |
+
+The loop ran **once** in the whole upload. Not slowly - not at all. The
+async generator feeding the writer never awaits anything, so there was no
+suspension point between the first byte and the last: every other request in
+the process waited for the entire file.
+
+The fix costs the upload itself. 23 ms becomes 49 ms, because each 64 KB
+write now hops to a worker thread. That is the trade, and it is the right
+way round: one uploader's request doubling from 23 ms to 49 ms is invisible,
+a 32 ms freeze applied to every concurrent request is not.
+
+**And 32 ms is the BEST case for the old code.** This machine's page cache
+absorbed 20 MB at about 870 MB/s. On a free VM with a network-backed volume,
+or once the kernel crosses its dirty-page threshold and `write()` blocks on
+writeback, the blocking version degrades with no bound while the threaded one
+does not. The mean was never the problem; the tail was.
+
+Hashing stays on the event loop deliberately: 64 KB of SHA-256 costs about a
+tenth of a millisecond, less than the thread hop needed to move it off.
+
 ## What is not measured here
 
 - **Generation.** Groq's latency is theirs, and measuring it would spend the

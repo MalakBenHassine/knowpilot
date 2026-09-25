@@ -16,6 +16,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import anyio
+
 # 20 MB: large enough for a scanned contract, small enough that one upload
 # cannot fill a free VM or hold a worker for minutes.
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -139,35 +141,48 @@ class FileStorage:
 
         Reading and hashing in one pass avoids walking 20 MB twice.
         """
-        path = self.path_for(document_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path = anyio.Path(self.path_for(document_id))
+        await path.parent.mkdir(parents=True, exist_ok=True)
 
         digest = hashlib.sha256()
         size = 0
 
         try:
-            # Blocking writes of 64 KB land in the page cache and return in
-            # microseconds. Worth revisiting only if the limit grows a lot.
-            with path.open("wb") as file:
+            # Every filesystem call here runs in a worker thread. A 64 KB
+            # write usually returns from the page cache in microseconds -
+            # and "usually" is exactly the problem. Once the kernel crosses
+            # its dirty-page threshold, write() blocks on writeback, and a
+            # blocked event loop stalls every other request in the process,
+            # not just this upload. The tail is what matters, not the mean.
+            async with await anyio.open_file(path, "wb") as file:
                 async for piece in stream:
                     size += len(piece)
                     # Checked while writing, never against Content-Length: the
                     # client controls that header and can simply lie about it.
                     if size > MAX_UPLOAD_BYTES:
                         raise FileTooLargeError(f"over {MAX_UPLOAD_BYTES} bytes")
+                    # Hashing stays on the loop: 64 KB of SHA-256 is about a
+                    # tenth of a millisecond, cheaper than the thread hop it
+                    # would take to move it off.
                     digest.update(piece)
-                    file.write(piece)
+                    await file.write(piece)
 
             if size == 0:
                 raise EmptyFileError("the uploaded file is empty")
         except StorageError:
             # Never leave a half-written file behind: it would count against
             # the disk for ever and belongs to no document row.
-            path.unlink(missing_ok=True)
+            await path.unlink(missing_ok=True)
             raise
 
         return StoredFile(path=str(path), size_bytes=size, content_hash=digest.hexdigest())
 
     def delete(self, document_id: uuid.UUID) -> None:
-        """Remove the bytes. Missing is success: deleting twice must be safe."""
+        """Remove the bytes. Missing is success: deleting twice must be safe.
+
+        Synchronous on purpose, unlike save(). One unlink is a single
+        metadata syscall, and this is handed to Starlette as a background
+        task: Starlette runs a SYNC callable in a worker thread and an async
+        one on the event loop, so staying sync is what keeps it off the loop.
+        """
         self.path_for(document_id).unlink(missing_ok=True)
