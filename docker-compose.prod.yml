@@ -261,7 +261,7 @@ services:
 
   redis:
     <<: *hardened
-    image: redis:8.8.2-alpine@sha256:96cb544fa0af5aa898d160cffb7dae70c3df117190fc123831c64712cda425ff
+    image: redis:8.10.0-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
     # A password even on a private network: defence in depth costs one
     # setting. `noeviction`, because Redis holds the job queue - a queue
     # that silently drops jobs under memory pressure loses uploads.
