@@ -109,6 +109,19 @@ jobs:
         working-directory: frontend
         run: npm run test:coverage
 
+      # An empty SONAR_TOKEN is the normal state of a repository that has just
+      # been created, and the scanner's own failure in that case names neither
+      # the secret nor where to put it. Ten seconds of reading a log, or one
+      # line here.
+      - name: The analysis needs a token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "${SONAR_TOKEN}" ]; then
+            echo "::error::SONAR_TOKEN is empty. Add it under Settings -> Secrets and variables -> Actions, named exactly SONAR_TOKEN."
+            exit 1
+          fi
+
       # sonar.qualitygate.wait makes the gate BLOCK: a run that lowers coverage
       # or adds a vulnerability fails the pull request. A gate that only
       # reports is a dashboard, not a gate.
