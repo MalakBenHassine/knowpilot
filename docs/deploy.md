@@ -88,7 +88,7 @@ The first time, make the three `knowpilot-*` packages public on GitHub
 **Check the signature before the first pull.** Every image is signed by the
 Release workflow with a keyless certificate; verifying it is what turns "the
 registry served me these bytes" into "CI built these bytes, from this commit".
-Install cosign once, then, for each of the three images:
+Install cosign **3.0 or newer**, then, for each of the three images:
 
 ```bash
 IMAGE=ghcr.io/malakbenhassine/knowpilot-backend:<sha>
@@ -100,6 +100,13 @@ cosign verify "$IMAGE" \
 The identity must name the tag you are deploying. A failure here means the
 tag does not point at what the workflow produced.
 Stop and find out why; do not start the stack.
+
+**The version matters, and the error does not say so.** These signatures
+are written in the bundle format cosign 3 introduced. A cosign 2.x client
+reports `no signatures found` - which reads like *there is no signature*,
+when it means *there is one and I cannot see it*. Checked against the
+published images: v3.0.2 verifies them, v2.6.1 does not. If you get that
+message, run `cosign version` before you suspect the release.
 
 **Or built on the server:** leave both variables unset, then:
 
