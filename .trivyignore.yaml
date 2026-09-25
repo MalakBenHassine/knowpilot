@@ -37,3 +37,19 @@ vulnerabilities:
       4.1.137, which Keycloak has not shipped yet. Keycloak is not exposed
       directly: Caddy terminates TLS and is the only published container.
     expired_at: 2026-12-31
+
+  - id: CVE-2026-84939
+    statement: >-
+      FreeMarker 2.3.32, inside the Keycloak distribution. Fixed upstream in
+      2.3.35; Keycloak 26.7.4 is the latest release and still ships 2.3.32, so
+      there is no version of Keycloak to upgrade to. Swapping the jar inside
+      the image was considered and rejected: `kc.sh build` indexes the
+      classpath during Quarkus augmentation, and shipping a login page that
+      does not render is worse than this. NOT claimed unreachable - Keycloak
+      renders its login pages with FreeMarker and the locale can be steered by
+      a request parameter. What bounds it is what this container holds: the
+      Keycloak distribution and nothing else. Every secret arrives as an
+      environment variable (docker-compose.prod.yml), so reading a file in
+      here exposes no credential. Remove this entry the day Keycloak ships
+      FreeMarker 2.3.35 or later.
+    expired_at: 2026-12-31
