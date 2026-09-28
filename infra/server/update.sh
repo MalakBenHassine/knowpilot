@@ -180,17 +180,25 @@ compose up -d --remove-orphans || {
 # request, which is the failure this whole script exists to catch.
 # Pipe-separated on purpose: with spaces, a container that declares no
 # healthcheck shifts every field and the columns stop meaning what they say.
+#
+# `ps -a`, not `ps`: api and worker sit in `created` until the model job has
+# finished downloading the weights. A filter that only looked at `running`
+# rows would not see them at all, and a stack whose two main services never
+# started would be reported as deployed. Observed on the first real
+# deployment: api||created, worker||created, everything else healthy.
 unhealthy() {
     local rows
-    rows="$(compose ps --format '{{.Service}}|{{.Health}}|{{.State}}' 2>/dev/null)"
-    # Nothing running at all is NOT success. Without this the list below comes
-    # back empty and the loop concludes that everything is healthy - which is
-    # how a deployment that started nothing declared itself deployed.
-    if ! grep -q '|running$' <<< "${rows}"; then
+    rows="$(compose ps -a --format '{{.Service}}|{{.Health}}|{{.State}}|{{.ExitCode}}' 2>/dev/null)"
+    # Nothing at all is not success either.
+    if [[ -z "${rows}" ]]; then
         echo "nothing is running"
         return 0
     fi
-    awk -F'|' '$3 == "running" && $2 != "" && $2 != "healthy" { print $1 }' <<< "${rows}"
+    awk -F'|' '
+        $3 == "running" { if ($2 != "" && $2 != "healthy") print $1 " (" $2 ")"; next }
+        $3 == "exited"  { if ($4 != "0") print $1 " (exit " $4 ")"; next }
+        { print $1 " (" $3 ")" }
+    ' <<< "${rows}"
 }
 
 say "Waiting up to ${HEALTH_TIMEOUT}s for the containers to become healthy"
