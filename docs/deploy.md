@@ -178,20 +178,82 @@ The alert rules are evaluated every fifteen seconds and shown under
 channel this deployment does not have (ADR-0021). Until one exists, the
 dashboard is what an operator looks at.
 
-## 8. Updates and rollback
+## 8. Updates, automatic
+
+A systemd timer deploys every new release on its own, and rolls back a
+release that does not come up ([ADR-0023](adr/0023-pull-based-deployment.md)).
+
+**Install cosign 3 first** - the deployer refuses to deploy what it cannot
+verify, and a 2.x client cannot read these signatures:
 
 ```bash
-# in .env.production: KP_IMAGE_TAG=<new sha>
+curl -fsSLO https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign-linux-amd64
+curl -fsSL https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign_checksums.txt |
+  grep ' cosign-linux-amd64$' | sha256sum -c
+sudo install -m 755 cosign-linux-amd64 /usr/local/bin/cosign && rm cosign-linux-amd64
+```
+
+Then see what it would do, before letting it do anything:
+
+```bash
+KP_DRY_RUN=1 ./infra/server/update.sh
+```
+
+It prints the deployed tag, the newest release, and the result of verifying
+each image. Nothing is written. When that reads correctly:
+
+```bash
+sudo ln -sf "$PWD/infra/server/update.sh" /usr/local/bin/knowpilot-update
+sudo cp infra/server/knowpilot-update.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now knowpilot-update.timer
+```
+
+The symlink is why the unit never has to know where the checkout lives.
+
+Watch it:
+
+```bash
+systemctl list-timers knowpilot-update.timer   # when it next fires
+journalctl -u knowpilot-update.service -f      # what it did
+sudo systemctl start knowpilot-update.service  # now, without waiting
+```
+
+A run that refuses says why and changes nothing. A run that deploys and then
+finds a container never became healthy writes the previous tag back and exits
+non-zero, so `systemctl status` is red and the journal holds the reason. It
+does **not** retry: a timer that reinstalls a broken release every five
+minutes is a loop, not a recovery.
+
+## 9. Updates, by hand
+
+Still the way to move to a version that is not the newest release, and the
+way to apply a change to the compose file or the Caddyfile:
+
+```bash
+sudo systemctl stop knowpilot-update.timer    # so it does not undo this
+# in .env.production: KP_IMAGE_TAG=<tag or sha>
 git pull                      # compose file, Caddyfile, scripts
 kp pull && kp up -d
 ```
 
 `migrate` runs again, and the API and the worker restart only if it
-succeeded. To roll back, set the previous sha and run `kp up -d` again. A
-migration is only rolled back by hand (`kp run --rm migrate alembic downgrade
--1`): read it first.
+succeeded.
 
-## 9. Backups
+**The deployer cannot roll back a migration, and neither can setting the old
+tag.** A migration is only rolled back by hand (`kp run --rm migrate alembic
+downgrade -1`): read it first. This is why migrations are written additively -
+a new column is nullable, a removal waits for the release after the one that
+stopped using it. A release that cannot be rolled back by restarting the
+previous images is a release the automation cannot save.
+
+Start the timer again when you are done:
+
+```bash
+sudo systemctl start knowpilot-update.timer
+```
+
+## 10. Backups
 
 The state is in three volumes: `postgres_data` (documents, chunks, users),
 `uploads` (the original files) and `caddy_data` (certificates). `models` can
@@ -206,7 +268,7 @@ docker run --rm -v knowpilot-prod_uploads:/data:ro -v "$PWD":/out alpine \
 Copy both files **off the machine**: a backup on the server it protects is
 not a backup. Restore them once, on a scratch machine, before you need to.
 
-## 10. Operating
+## 11. Operating
 
 | Need | Command |
 | --- | --- |

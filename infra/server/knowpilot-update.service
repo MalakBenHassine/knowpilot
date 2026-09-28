@@ -1,0 +1,23 @@
+# Deploy the newest signed release, if there is one.
+#
+# Installed by symlink so this unit never has to know where the checkout is:
+#   sudo ln -sf "$PWD/infra/server/update.sh" /usr/local/bin/knowpilot-update
+#
+# Watch it:  journalctl -u knowpilot-update.service -f
+[Unit]
+Description=Deploy the newest signed KnowPilot release
+Documentation=https://github.com/MalakBenHassine/knowpilot/blob/main/docs/deploy.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/knowpilot-update
+
+# Pulling three images, one of them 2.5 GB, over a domestic connection.
+TimeoutStartSec=1800
+
+# No Restart=. A run that failed has already rolled back and said why; a unit
+# that retries every thirty seconds turns one bad release into a loop, and
+# buries the log line that explained the first failure.

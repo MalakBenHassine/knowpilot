@@ -1,0 +1,25 @@
+# How often the server asks whether there is something new.
+#
+#   sudo systemctl enable --now knowpilot-update.timer
+#   systemctl list-timers knowpilot-update.timer
+[Unit]
+Description=Check for a new KnowPilot release
+
+[Timer]
+# Not at boot exactly: the machine has just started every container it knows
+# about, and deploying on top of that is how a reboot becomes an outage.
+OnBootSec=10min
+OnUnitActiveSec=5min
+
+# Persistent, so a machine that was off catches up once instead of not at all.
+Persistent=true
+
+# The GitHub API is rate-limited per IP. The jitter costs nothing here and is
+# the difference between one polite client and a thundering herd on the day
+# this runs on more than one server.
+RandomizedDelaySec=120
+
+Unit=knowpilot-update.service
+
+[Install]
+WantedBy=timers.target

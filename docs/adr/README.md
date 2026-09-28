@@ -31,6 +31,7 @@ decisions is as useful as the decisions themselves.
 | [0020](0020-single-vm-compose-deployment.md) | Deploy on one VM with Docker Compose, behind Caddy | Accepted |
 | [0021](0021-monitoring-stack.md) | Prometheus and Grafana on the same VM, reachable only through SSH | Accepted |
 | [0022](0022-kubernetes-manifests.md) | Kubernetes manifests for a local cluster, while production stays on Compose | Accepted |
+| [0023](0023-pull-based-deployment.md) | The server pulls its own releases, and verifies them first | Accepted |
 
 ## Template
 
