@@ -161,6 +161,14 @@ KP_ENV_FILE=.env.production KP_COMPOSE_FILE=docker-compose.prod.yml \
 It prints a temporary password, valid for the first login only. Send it by a
 channel other than the one carrying the link.
 
+When someone loses it - which is the ordinary case, not a mistake - the same
+script issues a new one and puts `UPDATE_PASSWORD` back, so the value stays
+usable exactly once:
+
+```bash
+KP_ENV_FILE=.env.production KP_COMPOSE_FILE=docker-compose.prod.yml     ./infra/keycloak/invite-user.sh --reset someone@example.org
+```
+
 ## 6. Check
 
 ```bash
