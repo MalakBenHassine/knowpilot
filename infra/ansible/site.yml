@@ -32,6 +32,9 @@
     cosign_sha256: 46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd
     # The API and the worker each hold the 2.2 GB embedding model.
     required_memory_mb: 6000
+    # Total RAM is not the question - what is FREE is. A 7 GB host running
+    # a JVM lab passes the total check and still gets OOM-killed.
+    required_available_mb: 5500
     required_disk_gb: 20
 
   pre_tasks:
@@ -45,12 +48,32 @@
       # deployment, which looks exactly like a broken release.
       ansible.builtin.assert:
         that:
-          - ansible_memtotal_mb | int >= required_memory_mb | int
+          # default(0): a host that does not report its memory must get the
+          # refusal sentence, not an undefined-variable traceback. Seen for
+          # real - WSL returns no hardware facts at all.
+          - ansible_memtotal_mb | default(0) | int >= required_memory_mb | int
         fail_msg: >-
-          This host has {{ ansible_memtotal_mb }} MB of RAM and the stack needs
+          This host reports {{ ansible_memtotal_mb | default(0) }} MB of RAM - or did not
+          report it at all - and the stack needs
           about {{ required_memory_mb }}. Give the machine more memory, or stop
           what is already using it, before running this again.
-        success_msg: "{{ ansible_memtotal_mb }} MB of RAM: enough."
+        success_msg: "{{ ansible_memtotal_mb | default(0) }} MB of RAM: enough."
+
+    - name: Refuse a machine whose memory is already spoken for
+      # Found on a real host: 7372 MB total - so the check above passed - with
+      # 1.9 GB actually available, because Nexus and SonarQube held 3 GB of
+      # JVM heap. Total RAM says what the machine has; this says what is left.
+      ansible.builtin.assert:
+        that:
+          - ansible_memory_mb.nocache.free | default(0) | int >= required_available_mb | int
+        fail_msg: >-
+          {{ ansible_memory_mb.nocache.free | default(0) }} MB of the
+          {{ ansible_memtotal_mb | default(0) }} MB
+          on this host are free, and the stack needs about {{ required_available_mb }}.
+          Something else is holding the rest. Find it with
+          'ps -eo pid,rss,args --sort=-rss | head' and 'docker ps', stop it, and
+          run this again.
+        success_msg: "{{ ansible_memory_mb.nocache.free | default(0) }} MB free right now: enough."
 
     - name: Refuse a machine with no room for the images
       ansible.builtin.assert:

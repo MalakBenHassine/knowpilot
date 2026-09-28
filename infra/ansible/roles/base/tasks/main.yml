@@ -1,5 +1,5 @@
 ---
-# Docker, from Docker's own repository, and nothing the stack does not need.
+# An engine and Compose v2, without evicting an engine that is already here.
 
 - name: Install what the other tasks need
   ansible.builtin.apt:
@@ -12,50 +12,83 @@
     update_cache: true
     cache_valid_time: 3600
 
-# Ubuntu's own docker.io package ships NO compose plugin - verified on a
-# machine running 29.1.3 from the distribution, where `docker compose version`
-# simply does not exist. Everything in this project is a compose file, so the
-# plugin is not optional and the official repository is the only place it
-# comes from.
-- name: Give apt Docker's signing key
-  ansible.builtin.get_url:
-    url: https://download.docker.com/linux/ubuntu/gpg
-    dest: /etc/apt/keyrings/docker.asc
-    mode: "0644"
-    force: false
+# What this role must guarantee is AN ENGINE PLUS COMPOSE V2 - not one
+# vendor's packages. The difference is not pedantry: docker-ce declares a
+# conflict with Ubuntu's docker.io, so installing it on a machine that is
+# already running containers makes apt remove the running engine first. On a
+# host that carries other work, that is not provisioning, it is an outage.
+#
+# So: a bare machine gets Docker from Docker's own repository. A machine that
+# already has an engine keeps it and only gains the plugin it was missing.
+- name: See whether an engine is already installed
+  ansible.builtin.package_facts:
+    manager: apt
 
-# deb822_repository, not apt_repository: the latter is deprecated and is
-# removed in ansible-core 2.25, and a provisioning playbook that breaks on
-# the next Ansible is not infrastructure, it is homework.
-- name: Add Docker's repository
-  ansible.builtin.deb822_repository:
-    name: docker
-    types: [deb]
-    uris: https://download.docker.com/linux/ubuntu
-    suites: ['{{ ansible_distribution_release }}']
-    components: [stable]
-    architectures:
-      - "{{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}"
-    signed_by: /etc/apt/keyrings/docker.asc
-    state: present
-    enabled: true
+- name: Install Docker from Docker's own repository
+  when: "'docker.io' not in ansible_facts.packages"
+  block:
+    - name: Give apt Docker's signing key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+        force: false
 
-- name: Install Docker Engine and the Compose plugin
+    # deb822_repository, not apt_repository: the latter is deprecated and is
+    # removed in ansible-core 2.25, and a provisioning playbook that breaks
+    # on the next Ansible is not infrastructure, it is homework.
+    - name: Add Docker's repository
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: [deb]
+        uris: https://download.docker.com/linux/ubuntu
+        suites: ['{{ ansible_distribution_release }}']
+        components: [stable]
+        architectures:
+          - "{{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}"
+        signed_by: /etc/apt/keyrings/docker.asc
+        state: present
+        enabled: true
+
+    - name: Install Docker Engine and the Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+# Ubuntu 24.04 ships docker-compose-v2 - the same CLI plugin, packaged by the
+# distribution that packaged the engine. Pulling Docker's repository into a
+# docker.io install would work today and be a dependency conflict later.
+- name: Add Compose v2 to the engine that is already here
+  when: "'docker.io' in ansible_facts.packages"
   ansible.builtin.apt:
-    name:
-      - docker-ce
-      - docker-ce-cli
-      - containerd.io
-      - docker-buildx-plugin
-      - docker-compose-plugin
+    name: docker-compose-v2
     state: present
     update_cache: true
+    cache_valid_time: 3600
 
 - name: Start Docker, and start it again after a reboot
   ansible.builtin.systemd_service:
     name: docker
     state: started
     enabled: true
+
+# Both paths above exist for this one command. Assert the capability instead of
+# trusting that the right package names imply it - which is how the missing
+# plugin went unnoticed on the first host in the first place.
+- name: Prove that compose v2 answers
+  ansible.builtin.command: docker compose version
+  register: base_compose
+  changed_when: false
+
+- name: Say which compose is in use
+  ansible.builtin.debug:
+    var: base_compose.stdout
 
 # Without this every compose command needs sudo, and the deployer runs as
 # root anyway - this is for the person who logs in.

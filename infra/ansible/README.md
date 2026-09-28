@@ -16,7 +16,7 @@ Nothing is installed on the target beforehand except Python, which Ubuntu has.
 
 | Role | |
 | --- | --- |
-| `base` | Docker Engine **and the Compose plugin**, from Docker's own repository; the login user in the `docker` group; the repository at `/opt/knowpilot`; `harden.sh` |
+| `base` | An engine **and Compose v2** - from Docker's repository on a bare host, or just the missing plugin on a host that already runs containers; the login user in the `docker` group; the repository at `/opt/knowpilot`; `harden.sh` |
 | `knowpilot` | cosign, pinned by checksum; `.env.production` with generated secrets; the deployer symlink; both systemd units; the timer |
 
 It ends with a **dry run of the deployer** - reading the latest release and
