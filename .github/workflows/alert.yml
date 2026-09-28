@@ -1,0 +1,66 @@
+name: Alert
+
+# Nobody watches a green tick. This turns a failed run on `main` into a GitHub
+# issue, which arrives by e-mail and stays open until someone closes it.
+#
+# An issue rather than Slack or Teams on purpose: no account to create, no
+# webhook URL to store as a secret, and the notification lives in the same
+# place as the work. The day there is a team with a channel, this job changes
+# and nothing else does.
+#
+# `workflow_run` runs from the default branch, AFTER another workflow finished,
+# with a token this repository controls - the failed run cannot influence it.
+
+on:
+  workflow_run:
+    workflows: [Backend, Frontend, Quality, Security, CodeQL, Kubernetes, Release]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  issue:
+    # Only real failures, only on the trunk. A cancelled run is somebody
+    # pushing twice, and a failure on a branch is that branch's business.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      (github.event.workflow_run.head_branch == 'main' ||
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          title="CI failure: ${WORKFLOW} on ${BRANCH}"
+
+          # One issue per workflow, not one per run. A workflow that fails
+          # forty times in an afternoon is one problem, and forty issues is
+          # how a team learns to ignore the notifications.
+          existing=$(gh issue list --repo "$REPOSITORY" --state open \
+              --search "$title in:title" --json number,title \
+              --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+
+          # shellcheck disable=SC2016  # the backticks are markdown for the
+          # issue body, and the single quotes are what keeps them literal
+          body=$(printf '%s\n\n- Commit: `%s`\n- Run: %s\n' \
+              "**${WORKFLOW}** failed on \`${BRANCH}\`." "$RUN_SHA" "$RUN_URL")
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPOSITORY" --body "$body"
+            echo "commented on #$existing"
+          else
+            gh issue create --repo "$REPOSITORY" \
+              --title "$title" --body "$body" --label ci-failure \
+              || gh issue create --repo "$REPOSITORY" --title "$title" --body "$body"
+            echo "opened a new issue"
+          fi
