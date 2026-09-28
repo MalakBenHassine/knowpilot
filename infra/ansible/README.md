@@ -5,8 +5,35 @@ One playbook takes a bare Ubuntu machine to one that deploys itself.
 ```bash
 cd infra/ansible
 cp inventory.example.ini inventory.ini     # put your host in it
-ansible-playbook site.yml --check          # change nothing, say what would change
-ansible-playbook site.yml
+./run.sh --check                           # change nothing, say what would change
+./run.sh                                   # apply
+```
+
+`run.sh` is the entry point rather than `ansible-playbook` directly, and that
+is not a convenience. The key that reaches the host has a passphrase, so an
+SSH agent must hold it; when none does, Ansible reports
+
+    ssh_askpass: exec(/usr/bin/ssh-askpass): No such file or directory
+    UNREACHABLE!
+
+which names neither the cause nor the fix. That cost three failed runs in one
+afternoon, each in a fresh terminal, each answered by copying a socket path by
+hand. `run.sh` starts an agent at a fixed address if there is none, compares
+**fingerprints** to see whether this key is in it, adds it once if not, and
+otherwise gets out of the way. Operational knowledge that lives in an
+operator's memory is a defect; this is where it lives instead.
+
+Give SSH the host once and even a bare `ssh` will load the key into that same
+agent, because `AddKeysToAgent` does for it what it already does for GitHub:
+
+```
+# ~/.ssh/config
+Host knowpilot-vm
+    HostName 192.168.184.128
+    User mlek
+    IdentityFile ~/.ssh/id_ed25519_knowpilot_vm
+    IdentitiesOnly yes
+    AddKeysToAgent yes
 ```
 
 Needs `ansible-core` on the machine you run it *from*, and SSH to the target.
