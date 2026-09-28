@@ -68,7 +68,21 @@ command -v cosign >/dev/null || fail "cosign is not installed (3.0 or newer)"
 read_env() { sed -n "s/^$1=//p" "${ENV_FILE}" | tail -1; }
 
 REGISTRY="$(read_env KP_IMAGE_REGISTRY)"
-CURRENT="$(read_env KP_IMAGE_TAG)"
+
+# KP_IMAGE_TAG in the env file is what compose SHOULD run - it has to be
+# written before `compose pull`, because compose reads it to know what to pull.
+# It is therefore NOT evidence that anything runs. This file is: it is written
+# only after the containers have become healthy.
+#
+# Conflating the two wedged a real host. A pull was cut off after ninety
+# minutes ("connection reset by peer"), the script exited 1 as it should - and
+# left KP_IMAGE_TAG=v0.2.0 behind. Every run after that read that tag, decided
+# it was already on v0.2.0, and did nothing, for ever, with nothing running.
+#
+# There is deliberately no fallback to KP_IMAGE_TAG when this file is missing:
+# a host in that state must deploy, not inherit the belief that broke it.
+STATE_FILE="${KP_STATE_FILE:-/var/lib/knowpilot/deployed}"
+CURRENT="$(cat "${STATE_FILE}" 2>/dev/null || true)"
 [[ -n "${REGISTRY}" ]] || fail "KP_IMAGE_REGISTRY is not set in ${ENV_FILE}"
 
 # --- what is the newest release? --------------------------------------------
@@ -130,18 +144,53 @@ write_tag() {
     fi
 }
 
+# Put the env file back the way it was, so a failed attempt does not leave
+# compose pointing at a tag this host never managed to run.
+restore_tag() { [[ -n "${CURRENT}" ]] && write_tag "${CURRENT}"; return 0; }
+
 say "Deploying ${LATEST}"
 write_tag "${LATEST}"
-compose pull --quiet
-compose up -d --remove-orphans
+
+# 2.5 GB over someone else's network. Seen for real: a reset after ninety
+# minutes of pulling. One lost connection is not a reason to give up on a
+# release - and the signatures were verified above, so a retry cannot fetch
+# anything else.
+pulled=""
+for attempt in 1 2 3; do
+    if compose pull --quiet; then
+        pulled=1
+        break
+    fi
+    echo "    pull attempt ${attempt} of 3 failed" >&2
+    sleep 30
+done
+if [[ -z "${pulled}" ]]; then
+    restore_tag
+    fail "could not pull the images for ${LATEST} after three attempts"
+fi
+
+compose up -d --remove-orphans || {
+    restore_tag
+    fail "compose refused to start ${LATEST}"
+}
 
 # --- did it come up? ---------------------------------------------------------
 # Every container that declares a healthcheck must reach `healthy`. A container
 # that only says `running` says nothing: a process can be up and refusing every
 # request, which is the failure this whole script exists to catch.
+# Pipe-separated on purpose: with spaces, a container that declares no
+# healthcheck shifts every field and the columns stop meaning what they say.
 unhealthy() {
-    compose ps --format '{{.Service}} {{.Health}} {{.State}}' 2>/dev/null \
-      | awk '$3 == "running" && $2 != "" && $2 != "healthy" { print $1 }'
+    local rows
+    rows="$(compose ps --format '{{.Service}}|{{.Health}}|{{.State}}' 2>/dev/null)"
+    # Nothing running at all is NOT success. Without this the list below comes
+    # back empty and the loop concludes that everything is healthy - which is
+    # how a deployment that started nothing declared itself deployed.
+    if ! grep -q '|running$' <<< "${rows}"; then
+        echo "nothing is running"
+        return 0
+    fi
+    awk -F'|' '$3 == "running" && $2 != "" && $2 != "healthy" { print $1 }' <<< "${rows}"
 }
 
 say "Waiting up to ${HEALTH_TIMEOUT}s for the containers to become healthy"
@@ -154,6 +203,9 @@ done
 
 pending="$(unhealthy)"
 if [[ -z "${pending}" ]]; then
+    # Only now. This file is the record that ${LATEST} actually ran here.
+    mkdir -p "$(dirname "${STATE_FILE}")"
+    printf '%s\n' "${LATEST}" > "${STATE_FILE}"
     say "Deployed ${LATEST}"
     exit 0
 fi
