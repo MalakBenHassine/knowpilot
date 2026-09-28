@@ -68,7 +68,13 @@ command -v cosign >/dev/null || fail "cosign is not installed (3.0 or newer)"
 [[ -f "${ENV_FILE}" ]] || fail "no ${ENV_FILE}"
 [[ -f "${COMPOSE_FILE}" ]] || fail "no ${COMPOSE_FILE}"
 
-read_env() { sed -n "s/^$1=//p" "${ENV_FILE}" | tail -1; }
+# Values may be quoted - Ansible writes KP_TLS="tls internal", because a value
+# with a space has to survive being `source`d by the shell scripts that also
+# read this file. Strip one layer of quotes so both readers agree.
+read_env() {
+    sed -n "s/^$1=//p" "${ENV_FILE}" | tail -1 \
+        | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
 
 REGISTRY="$(read_env KP_IMAGE_REGISTRY)"
 

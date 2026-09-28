@@ -54,7 +54,11 @@
   ansible.builtin.lineinfile:
     path: "{{ knowpilot_directory }}/.env.production"
     regexp: "^#? *{{ item.key }}="
-    line: "{{ item.key }}={{ item.value }}"
+    # Quoted, because these scripts `source` this file and a value with a
+    # space breaks that: KP_TLS=tls internal made bash read KP_TLS=tls as an
+    # environment prefix and try to run `internal` as a command. Compose
+    # strips the quotes, verified on this version.
+    line: '{{ item.key }}="{{ item.value }}"'
     mode: "0600"
   loop:
     - {key: KP_IMAGE_REGISTRY, value: "{{ knowpilot_registry }}"}
