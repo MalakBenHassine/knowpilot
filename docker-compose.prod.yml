@@ -100,6 +100,8 @@ services:
     environment:
       KP_DOMAIN: ${KP_DOMAIN}
       KP_ACME_EMAIL: ${KP_ACME_EMAIL:?KP_ACME_EMAIL is required}
+      # Empty on a public host: Let's Encrypt. `tls internal` on a private one.
+      KP_TLS: ${KP_TLS:-}
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # Certificates and the ACME account. Losing them means asking Let's

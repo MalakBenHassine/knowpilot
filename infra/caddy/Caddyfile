@@ -16,6 +16,14 @@
 }
 
 {$KP_DOMAIN} {
+	# Empty for Let's Encrypt, which is the default and what a public server
+	# wants. On a private address - a VM on a laptop, a machine behind NAT -
+	# ACME can never succeed, because the challenge has to reach this host
+	# from the internet. KP_TLS becomes `tls internal` there and Caddy issues
+	# its own certificate instead of asking for one it will never get. Without
+	# this there is no certificate at all, so there is no HTTPS at all.
+	{$KP_TLS}
+
 	# --- Headers for every response -------------------------------------
 	header {
 		# HTTPS only, for a year, remembered by the browser: a user on a

@@ -43,6 +43,21 @@ name containing an IP to that IP, with no account to create:
 
 Replace the dashes with your server's public IP.
 
+**On a private address there is no public certificate to be had.** A VM on a
+laptop, or any host behind NAT, cannot pass an ACME challenge: the challenge
+has to reach port 80 from the internet. Set
+
+    KP_TLS=tls internal
+
+and Caddy signs with its own CA instead. Browsers warn once and everything
+else behaves identically. Leave `KP_TLS` empty on a public server - that is
+Let's Encrypt, which is what you want there.
+
+Without this the stack still starts, and Caddy holds no certificate at all: no
+HTTPS, and every request refused at the handshake. The Ansible playbook decides
+this from the host's own address, so a private machine gets it right by itself
+([infra/ansible](../infra/ansible/README.md)).
+
 ## 3. Configuration
 
 ```bash
