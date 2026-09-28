@@ -147,11 +147,26 @@ write_tag() {
     fi
 }
 
+# A release is the images AND the file that runs them. Pinning only the images
+# left docker-compose.prod.yml at whatever `main` happened to hold, so a change
+# to it sat on the host until some unrelated release carried it - and until
+# then the running stack and the tag it claimed to be silently disagreed.
+# Found the hard way: a one-character permission fix could not be deployed at
+# all, because the deployer had nothing new to react to.
+#
+# .env.production is git-ignored, so --force cannot take the secrets with it.
+checkout() {
+    [[ -d "${PROJECT_DIR}/.git" ]] || return 0
+    git -C "${PROJECT_DIR}" fetch --tags --quiet origin         || fail "cannot fetch ${REPOSITORY} into ${PROJECT_DIR}"
+    git -C "${PROJECT_DIR}" checkout --force --quiet "$1"         || fail "${PROJECT_DIR} has no $1 to check out"
+}
+
 # Put the env file back the way it was, so a failed attempt does not leave
 # compose pointing at a tag this host never managed to run.
 restore_tag() { [[ -n "${CURRENT}" ]] && write_tag "${CURRENT}"; return 0; }
 
 say "Deploying ${LATEST}"
+checkout "${LATEST}"
 write_tag "${LATEST}"
 
 # 2.5 GB over someone else's network. Seen for real: a reset after ninety
@@ -229,6 +244,7 @@ if [[ -z "${CURRENT}" ]]; then
 fi
 
 say "Rolling back to ${CURRENT}"
+checkout "${CURRENT}"
 write_tag "${CURRENT}"
 compose up -d --remove-orphans
 echo "Rolled back to ${CURRENT}. ${LATEST} did not become healthy." >&2

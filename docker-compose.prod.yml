@@ -143,6 +143,7 @@ services:
         echo "KP_TLS is set but Caddy wrote no local CA in 60s" >&2; exit 1; fi;
         sleep 1; done;
         cp /ca/caddy/pki/authorities/local/root.crt /export/root.crt;
+        chmod 0644 /export/root.crt;
         echo "exported Caddy local root certificate"
     environment:
       KP_TLS: ${KP_TLS:-}
@@ -476,6 +477,9 @@ volumes:
   caddy_data:
   caddy_config:
   # Holds one file: Caddy's local root certificate. Never its key.
+  # Mode 0644, because cp inherits Caddy's 0600 and the API runs as uid 1001:
+  # it read Permission denied on a file that is public by definition. The 0600
+  # meant something only next to the private key, which does not come here.
   ca_trust:
   prometheus_data:
   grafana_data:
