@@ -42,3 +42,6 @@ k8s/overlays/*/secrets.env
 !.vscode/extensions.json
 .DS_Store
 Thumbs.db
+
+# An inventory names real hosts and accounts.
+infra/ansible/inventory.ini

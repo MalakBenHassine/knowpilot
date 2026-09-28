@@ -1,0 +1,6 @@
+---
+- name: Say that the group needs a new session
+  ansible.builtin.debug:
+    msg: >-
+      Added to the docker group. That only takes effect on the next login -
+      log out and back in, or use sudo until then.

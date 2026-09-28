@@ -1,0 +1,95 @@
+---
+# cosign, the configuration, and the timer that deploys.
+
+- name: Download cosign
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/sigstore/cosign/releases/download/{{ cosign_version }}/cosign-linux-amd64
+    dest: /usr/local/bin/cosign
+    # Pinned by checksum, not by tag. A release asset can be replaced; a
+    # sha256 cannot, and this binary is what decides whether an image is
+    # allowed to run here.
+    checksum: "sha256:{{ cosign_sha256 }}"
+    mode: "0755"
+  when: ansible_architecture == "x86_64"
+
+- name: Refuse to guess on another architecture
+  ansible.builtin.assert:
+    that: ansible_architecture == "x86_64"
+    fail_msg: >-
+      This role pins the x86_64 cosign checksum only. Add the arm64 one
+      before running it on {{ ansible_architecture }} - an unpinned download
+      is the one thing this whole chain exists to avoid.
+
+- name: Create the production configuration from the example
+  ansible.builtin.copy:
+    src: "{{ knowpilot_directory }}/.env.production.example"
+    dest: "{{ knowpilot_directory }}/.env.production"
+    remote_src: true
+    mode: "0600"
+    # Never overwrite: the passwords already in it are the ones PostgreSQL
+    # and Keycloak store. Replacing them locks the stack out of its own data.
+    force: false
+
+# Generated ON THE TARGET, so no password is ever templated from the control
+# machine, written to this repository, or printed in an Ansible log.
+- name: Generate every empty password and secret
+  ansible.builtin.command: "{{ knowpilot_directory }}/infra/server/fill-secrets.sh .env.production"
+  args:
+    chdir: "{{ knowpilot_directory }}"
+  register: knowpilot_secrets
+  changed_when: "'0 generated' not in knowpilot_secrets.stdout"
+  # The script prints counts, never values - but say so anyway.
+  no_log: false
+
+- name: Point the stack at the published images
+  ansible.builtin.lineinfile:
+    path: "{{ knowpilot_directory }}/.env.production"
+    regexp: "^#? *{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    mode: "0600"
+  loop:
+    - {key: KP_IMAGE_REGISTRY, value: "{{ knowpilot_registry }}"}
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Make the deployer reachable under a stable name
+  # The unit files name /usr/local/bin/knowpilot-update, so they never have to
+  # know where the checkout lives.
+  ansible.builtin.file:
+    src: "{{ knowpilot_directory }}/infra/server/update.sh"
+    dest: /usr/local/bin/knowpilot-update
+    state: link
+
+- name: Install the systemd units
+  ansible.builtin.copy:
+    src: "{{ knowpilot_directory }}/infra/server/{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    remote_src: true
+    mode: "0644"
+  loop:
+    - knowpilot-update.service
+    - knowpilot-update.timer
+  notify: Reload systemd
+
+- name: Check what the deployer would do, before letting it do it
+  # A dry run on every provision: it reads the release, verifies the three
+  # signatures, and changes nothing. If this fails, the timer would have
+  # failed too - and finding out here is cheaper than finding out at 04:00.
+  ansible.builtin.command: /usr/local/bin/knowpilot-update
+  environment:
+    KP_DRY_RUN: "1"
+    KP_ENV_FILE: "{{ knowpilot_directory }}/.env.production"
+  register: knowpilot_dry_run
+  changed_when: false
+
+- name: Show what it found
+  ansible.builtin.debug:
+    var: knowpilot_dry_run.stdout_lines
+
+- name: Start the timer
+  ansible.builtin.systemd_service:
+    name: knowpilot-update.timer
+    state: started
+    enabled: true
+    daemon_reload: true

@@ -1,0 +1,81 @@
+---
+# Provision a machine to run KnowPilot, and leave it deploying itself.
+#
+#   ansible-playbook -i inventory.ini site.yml
+#   ansible-playbook -i inventory.ini site.yml --check   # change nothing
+#
+# What is Ansible's job and what is not:
+#
+#   PROVISIONING - packages, users, firewall, services, unit files - is
+#   declarative and belongs here. Running this twice changes nothing the
+#   second time, and that is the whole value.
+#
+#   DEPLOYING is not. infra/server/update.sh runs every five minutes from a
+#   systemd timer, verifies a signature and rolls back; Ansible is not on the
+#   machine at that moment and should not be. This playbook installs the
+#   deployer; it does not replace it.
+#
+# Secrets are GENERATED ON THE TARGET by infra/server/fill-secrets.sh. Nothing
+# secret is templated from here, so no password ever exists on the control
+# machine, in this repository, or in an Ansible log.
+
+- name: Provision a KnowPilot host
+  hosts: knowpilot
+  become: true
+
+  vars:
+    knowpilot_repository: https://github.com/MalakBenHassine/knowpilot.git
+    knowpilot_version: main
+    knowpilot_directory: /opt/knowpilot
+    knowpilot_registry: ghcr.io/malakbenhassine
+    cosign_version: v3.0.2
+    cosign_sha256: 46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd
+    # The API and the worker each hold the 2.2 GB embedding model.
+    required_memory_mb: 6000
+    required_disk_gb: 20
+
+  pre_tasks:
+    - name: Read how much memory and disk this machine really has
+      ansible.builtin.setup:
+        gather_subset:
+          - hardware
+
+    - name: Refuse a machine that cannot hold the stack
+      # Better a sentence now than an OOM kill in the middle of the first
+      # deployment, which looks exactly like a broken release.
+      ansible.builtin.assert:
+        that:
+          - ansible_memtotal_mb | int >= required_memory_mb | int
+        fail_msg: >-
+          This host has {{ ansible_memtotal_mb }} MB of RAM and the stack needs
+          about {{ required_memory_mb }}. Give the machine more memory, or stop
+          what is already using it, before running this again.
+        success_msg: "{{ ansible_memtotal_mb }} MB of RAM: enough."
+
+    - name: Refuse a machine with no room for the images
+      ansible.builtin.assert:
+        that:
+          # `| first | default(0)` rather than `| first`: a host whose root
+          # mount Ansible cannot read is refused with the sentence below,
+          # instead of dying on a Jinja error nobody can act on.
+          - (ansible_mounts | selectattr('mount', 'equalto', '/')
+             | map(attribute='size_available') | first | default(0) | int)
+            > (required_disk_gb | int * 1024 * 1024 * 1024)
+        fail_msg: >-
+          Less than {{ required_disk_gb }} GB free on / - or no readable root
+          mount at all. The three images and the model volume need about
+          that much before anything starts.
+        success_msg: "Enough free space on /."
+
+  roles:
+    - base
+    - knowpilot
+
+  post_tasks:
+    - name: Say what to do next
+      ansible.builtin.debug:
+        msg:
+          - "Provisioned. The timer checks for a new release every five minutes."
+          - "Watch it:      journalctl -u knowpilot-update.service -f"
+          - "Force a check: sudo systemctl start knowpilot-update.service"
+          - "Preview only:  sudo KP_DRY_RUN=1 {{ knowpilot_directory }}/infra/server/update.sh"

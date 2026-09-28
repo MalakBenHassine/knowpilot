@@ -1,0 +1,88 @@
+---
+# Docker, from Docker's own repository, and nothing the stack does not need.
+
+- name: Install what the other tasks need
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Ubuntu's own docker.io package ships NO compose plugin - verified on a
+# machine running 29.1.3 from the distribution, where `docker compose version`
+# simply does not exist. Everything in this project is a compose file, so the
+# plugin is not optional and the official repository is the only place it
+# comes from.
+- name: Give apt Docker's signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+    force: false
+
+# deb822_repository, not apt_repository: the latter is deprecated and is
+# removed in ansible-core 2.25, and a provisioning playbook that breaks on
+# the next Ansible is not infrastructure, it is homework.
+- name: Add Docker's repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ['{{ ansible_distribution_release }}']
+    components: [stable]
+    architectures:
+      - "{{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}"
+    signed_by: /etc/apt/keyrings/docker.asc
+    state: present
+    enabled: true
+
+- name: Install Docker Engine and the Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: Start Docker, and start it again after a reboot
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+
+# Without this every compose command needs sudo, and the deployer runs as
+# root anyway - this is for the person who logs in.
+- name: Let the login user talk to Docker without sudo
+  ansible.builtin.user:
+    name: "{{ ansible_user | default(lookup('env', 'USER')) }}"
+    groups: docker
+    append: true
+  notify: Say that the group needs a new session
+
+- name: Fetch the repository
+  ansible.builtin.git:
+    repo: "{{ knowpilot_repository }}"
+    dest: "{{ knowpilot_directory }}"
+    version: "{{ knowpilot_version }}"
+    # The deployer only reads this checkout; nothing here is edited in place,
+    # so a forced update is safe and keeps the units and scripts current.
+    force: true
+  register: base_checkout
+
+# harden.sh is idempotent, its refusals are tested in a container - no key
+# installed, a sshd_config that does not validate - and it is 200 lines of
+# shell that already work. Reimplementing it as tasks would mean writing those
+# tests again in another language. Ansible runs it instead, and reports honestly
+# whether it changed anything.
+- name: Harden the host
+  ansible.builtin.command: "{{ knowpilot_directory }}/infra/server/harden.sh"
+  register: base_hardening
+  changed_when: "'already in /etc/ufw/after.rules' not in base_hardening.stdout"
+  failed_when: base_hardening.rc != 0

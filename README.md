@@ -41,7 +41,7 @@ single VM ([docs/deploy.md](docs/deploy.md)).
 | RAG            | LangChain, BGE-M3 embeddings, pgvector, Groq LLM     |
 | Data           | PostgreSQL, Redis                                    |
 | DevSecOps      | GitHub Actions, SonarQube Cloud, CodeQL, Trivy, gitleaks, shellcheck, cosign, Dependabot |
-| Infrastructure | Docker Compose, Caddy, Let's Encrypt; Kustomize manifests for Kubernetes |
+| Infrastructure | Docker Compose, Caddy, Let's Encrypt; Ansible to provision the host; Kustomize manifests for Kubernetes |
 | Observability  | Prometheus, Grafana, alert rules                     |
 
 ## Running the services
@@ -309,6 +309,13 @@ GitHub ever connects to it. A compromised workflow can publish an image; it
 cannot sign one as the release workflow, and an image that fails that check is
 one this script refuses to pull. The supply chain closes on the machine that
 executes the code, not on the one that built it.
+
+A host is provisioned by one playbook, [infra/ansible/](infra/ansible/):
+Docker with the Compose plugin, cosign pinned by checksum, the generated
+secrets, and the timer above - ending with a dry run of the deployer, so a
+provisioning run that would have produced a broken timer fails then and not
+at four in the morning. It refuses a machine with too little memory rather
+than letting the OOM killer end the first deployment halfway through.
 
 The host it runs on is hardened by
 [infra/server/harden.sh](infra/server/harden.sh): deny-by-default firewall,
