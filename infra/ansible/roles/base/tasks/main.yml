@@ -42,10 +42,10 @@
         name: docker
         types: [deb]
         uris: https://download.docker.com/linux/ubuntu
-        suites: ['{{ ansible_distribution_release }}']
+        suites: ["{{ ansible_facts['distribution_release'] }}"]
         components: [stable]
         architectures:
-          - "{{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}"
+          - "{{ ansible_facts['architecture'] | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}"
         signed_by: /etc/apt/keyrings/docker.asc
         state: present
         enabled: true
@@ -85,6 +85,12 @@
   ansible.builtin.command: docker compose version
   register: base_compose
   changed_when: false
+  # Reads and changes nothing, so it runs in --check too - a dry run that skips
+  # the one check that matters reports a success it never established.
+  check_mode: false
+  # But in --check the install above was only simulated, so a missing plugin
+  # there is the dry run's own doing. Report it, do not fail on it.
+  failed_when: base_compose.rc != 0 and not ansible_check_mode
 
 - name: Say which compose is in use
   ansible.builtin.debug:

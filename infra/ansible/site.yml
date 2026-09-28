@@ -28,6 +28,16 @@
     knowpilot_version: main
     knowpilot_directory: /opt/knowpilot
     knowpilot_registry: ghcr.io/malakbenhassine
+    knowpilot_ip: "{{ ansible_facts['default_ipv4']['address'] | default('') }}"
+    # sslip.io resolves a dashed address to that address, so a host with no DNS
+    # entry still has a NAME - and a name is what a certificate is issued for.
+    # Override with a real domain on a public server.
+    knowpilot_domain: "knowpilot.{{ knowpilot_ip | replace('.', '-') }}.sslip.io"
+    # A private address can never pass an ACME challenge: the challenge has to
+    # reach this host from the internet. So Caddy signs with its own CA there,
+    # and asks Let's Encrypt everywhere else. Deciding this from the address
+    # beats asking the operator to remember which case they are in.
+    knowpilot_tls: "{{ 'tls internal' if knowpilot_ip is match('^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)') else '' }}"
     cosign_version: v3.0.2
     cosign_sha256: 46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd
     # The API and the worker each hold the 2.2 GB embedding model.
@@ -51,13 +61,13 @@
           # default(0): a host that does not report its memory must get the
           # refusal sentence, not an undefined-variable traceback. Seen for
           # real - WSL returns no hardware facts at all.
-          - ansible_memtotal_mb | default(0) | int >= required_memory_mb | int
+          - ansible_facts['memtotal_mb'] | default(0) | int >= required_memory_mb | int
         fail_msg: >-
-          This host reports {{ ansible_memtotal_mb | default(0) }} MB of RAM - or did not
+          This host reports {{ ansible_facts['memtotal_mb'] | default(0) }} MB of RAM - or did not
           report it at all - and the stack needs
           about {{ required_memory_mb }}. Give the machine more memory, or stop
           what is already using it, before running this again.
-        success_msg: "{{ ansible_memtotal_mb | default(0) }} MB of RAM: enough."
+        success_msg: "{{ ansible_facts['memtotal_mb'] | default(0) }} MB of RAM: enough."
 
     - name: Refuse a machine whose memory is already spoken for
       # Found on a real host: 7372 MB total - so the check above passed - with
@@ -65,15 +75,15 @@
       # JVM heap. Total RAM says what the machine has; this says what is left.
       ansible.builtin.assert:
         that:
-          - ansible_memory_mb.nocache.free | default(0) | int >= required_available_mb | int
+          - ansible_facts['memory_mb'].nocache.free | default(0) | int >= required_available_mb | int
         fail_msg: >-
-          {{ ansible_memory_mb.nocache.free | default(0) }} MB of the
-          {{ ansible_memtotal_mb | default(0) }} MB
+          {{ ansible_facts['memory_mb'].nocache.free | default(0) }} MB of the
+          {{ ansible_facts['memtotal_mb'] | default(0) }} MB
           on this host are free, and the stack needs about {{ required_available_mb }}.
           Something else is holding the rest. Find it with
           'ps -eo pid,rss,args --sort=-rss | head' and 'docker ps', stop it, and
           run this again.
-        success_msg: "{{ ansible_memory_mb.nocache.free | default(0) }} MB free right now: enough."
+        success_msg: "{{ ansible_facts['memory_mb'].nocache.free | default(0) }} MB free right now: enough."
 
     - name: Refuse a machine with no room for the images
       ansible.builtin.assert:
@@ -81,7 +91,7 @@
           # `| first | default(0)` rather than `| first`: a host whose root
           # mount Ansible cannot read is refused with the sentence below,
           # instead of dying on a Jinja error nobody can act on.
-          - (ansible_mounts | selectattr('mount', 'equalto', '/')
+          - (ansible_facts['mounts'] | selectattr('mount', 'equalto', '/')
              | map(attribute='size_available') | first | default(0) | int)
             > (required_disk_gb | int * 1024 * 1024 * 1024)
         fail_msg: >-
@@ -89,6 +99,19 @@
           mount at all. The three images and the model volume need about
           that much before anything starts.
         success_msg: "Enough free space on /."
+
+    - name: Refuse a machine with no address of its own
+      # Everything downstream is named after it: the domain, the certificate,
+      # the issuer in every token. An empty one produces a stack that starts
+      # and serves nothing.
+      ansible.builtin.assert:
+        that:
+          - knowpilot_ip | length > 0
+        fail_msg: >-
+          This host reports no default IPv4 address, so there is nothing to
+          name it after. Give it a route to a network, or set knowpilot_domain
+          by hand, before running this again.
+        success_msg: "{{ knowpilot_domain }} - certificate from {{ knowpilot_tls | default('ACME', true) }}"
 
   roles:
     - base

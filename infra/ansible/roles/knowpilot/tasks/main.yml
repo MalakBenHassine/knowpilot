@@ -11,14 +11,14 @@
     # allowed to run here.
     checksum: "sha256:{{ cosign_sha256 }}"
     mode: "0755"
-  when: ansible_architecture == "x86_64"
+  when: ansible_facts['architecture'] == "x86_64"
 
 - name: Refuse to guess on another architecture
   ansible.builtin.assert:
-    that: ansible_architecture == "x86_64"
+    that: ansible_facts['architecture'] == "x86_64"
     fail_msg: >-
       This role pins the x86_64 cosign checksum only. Add the arm64 one
-      before running it on {{ ansible_architecture }} - an unpinned download
+      before running it on {{ ansible_facts['architecture'] }} - an unpinned download
       is the one thing this whole chain exists to avoid.
 
 - name: Create the production configuration from the example
@@ -42,7 +42,7 @@
   # The script prints counts, never values - but say so anyway.
   no_log: false
 
-- name: Point the stack at the published images
+- name: Point the stack at this host and at the published images
   ansible.builtin.lineinfile:
     path: "{{ knowpilot_directory }}/.env.production"
     regexp: "^#? *{{ item.key }}="
@@ -50,6 +50,8 @@
     mode: "0600"
   loop:
     - {key: KP_IMAGE_REGISTRY, value: "{{ knowpilot_registry }}"}
+    - {key: KP_DOMAIN, value: "{{ knowpilot_domain }}"}
+    - {key: KP_TLS, value: "{{ knowpilot_tls }}"}
   loop_control:
     label: "{{ item.key }}"
 
