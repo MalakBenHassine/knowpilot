@@ -110,17 +110,25 @@ spec:
           # for a probe is ONE, so without this the check never finished
           # once, and the worker sat at 0/1 for a quarter of an hour while
           # its own log said it was ready.
+          # Reads arq's own health key, whose TTL is health_check_interval + 1
+          # (app/worker.py names it HEALTH_KEY), so the key existing IS the
+          # liveness signal. NOT `arq --check`: that imports the application
+          # and torch with it, and was MEASURED at 41 to 90 seconds on a slow
+          # host - past the 20 s allowed below, let alone a default of 1. This
+          # probe measured 2.2 s on the same machine.
           startupProbe:
             exec:
-              command: ["arq", "--check", "app.worker.WorkerSettings"]
-            periodSeconds: 30
-            timeoutSeconds: 20
-            failureThreshold: 10
+              command: ["python", "-c", "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['KP_REDIS_URL']).exists('knowpilot:worker-health') else 1)"]
+            periodSeconds: 15
+            timeoutSeconds: 15
+            # 2.2 GB of weights load first: measured at 134 s where another
+            # process loaded its own copy on the same CPUs.
+            failureThreshold: 30
           livenessProbe:
             exec:
-              command: ["arq", "--check", "app.worker.WorkerSettings"]
+              command: ["python", "-c", "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['KP_REDIS_URL']).exists('knowpilot:worker-health') else 1)"]
             periodSeconds: 60
-            timeoutSeconds: 20
+            timeoutSeconds: 15
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false

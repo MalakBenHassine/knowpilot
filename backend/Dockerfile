@@ -130,7 +130,11 @@ EXPOSE 8000
 # NOTE - this healthcheck describes the API, which is the default role of this
 # image. The worker has no HTTP port and overrides it in Compose. An image
 # that serves two roles cannot carry one healthcheck for both.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+# start-period 300s, not 120s: loading BAAI/bge-m3 was MEASURED at 134 s on a
+# host where the worker loaded its own copy at the same time. At 120 s the API
+# was marked unhealthy while it was merely still starting, and the deployer
+# rolled back a release that was fine.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
     CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=4).status == 200 else 1)"
 
 # Exec form, never the shell form. `CMD uvicorn ...` would run under /bin/sh,

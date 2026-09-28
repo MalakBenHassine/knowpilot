@@ -111,6 +111,14 @@ async def shutdown(context: dict[str, Any]) -> None:
     await context["engine"].dispose()
 
 
+# The key arq refreshes while it is alive. The container healthcheck reads it
+# instead of running `arq --check`: that command imports this module, and with
+# it torch and transformers, which was MEASURED at 41 to 90 seconds against a
+# 10-second probe timeout. A worker that was perfectly healthy could therefore
+# never be reported healthy, and every deployment timed out waiting for it.
+HEALTH_KEY = "knowpilot:worker-health"
+
+
 class WorkerSettings:
     """Read by the `arq` command line. Plain attributes, no framework magic."""
 
@@ -137,9 +145,13 @@ class WorkerSettings:
     # disagree.
     keep_result = 300
     # How often the worker writes its health key to Redis, which lives
-    # interval + 1 seconds. `arq --check` - the container healthcheck - fails
-    # once the key is gone. arq's default is an HOUR, which made the check
-    # meaningless: a dead worker would have looked healthy for 59 minutes.
-    # Sixty seconds rather than five, because the key is written between jobs
-    # and a long document must not make a busy worker look dead.
+    # interval + 1 seconds - so the key's mere PRESENCE means the worker
+    # reported in within the last minute. arq's default is an HOUR, which made
+    # the check meaningless: a dead worker would have looked healthy for 59
+    # minutes. Sixty seconds rather than five, because the key is written
+    # between jobs and a long document must not make a busy worker look dead.
     health_check_interval = 60
+    # Named here rather than left to arq's default, because the container
+    # healthcheck in docker-compose.prod.yml reads this exact key. A default
+    # that changed in a future arq would silently break that probe.
+    health_check_key = HEALTH_KEY

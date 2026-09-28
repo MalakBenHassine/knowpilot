@@ -109,6 +109,14 @@ would have:
   ready.** `arq --check` is not a request to a running server: it starts a
   Python interpreter that imports the application, torch included, and takes
   about seven seconds. A probe's default `timeoutSeconds` is one.
+
+  **This was treated as a timeout to raise, and that was the wrong lesson.**
+  The same command stayed in `docker-compose.prod.yml` with ten seconds
+  allowed, and on the deployment VM it measured 41 to 90 seconds - seven
+  seconds was a property of this laptop, not of the command. The probe now
+  reads the health key arq already refreshes (2.2 s measured), here and in
+  Compose. A check whose cost scales with the size of the application is not a
+  check, whatever timeout it is given.
 - **The isolation test was flaky, and the policies were not.** The first
   version started a pod per probe and connected immediately; it reported three
   failures, then three different ones. kube-router programs a pod's rules a

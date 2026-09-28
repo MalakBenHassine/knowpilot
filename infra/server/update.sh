@@ -29,9 +29,12 @@ COMPOSE_FILE="${KP_COMPOSE_FILE:-${PROJECT_DIR}/docker-compose.prod.yml}"
 ISSUER="https://token.actions.githubusercontent.com"
 IMAGES=(backend frontend keycloak)
 
-# A deployment that has not become healthy in five minutes is not slow, it is
-# broken: the images are already pulled, so this only covers starting.
-HEALTH_TIMEOUT="${KP_HEALTH_TIMEOUT:-300}"
+# Must exceed the longest start_period in the compose file, plus a few probe
+# intervals. Both the API and the worker declare 300 s, because each loads
+# 2.2 GB of weights - measured at 134 s with the two competing for the same
+# CPUs. Five minutes total, the old value, expired while a healthy stack was
+# still legitimately starting, and the deployer rolled back a good release.
+HEALTH_TIMEOUT="${KP_HEALTH_TIMEOUT:-900}"
 
 say() { printf '==> %s\n' "$1"; }
 fail() { printf 'REFUSED: %s\n' "$1" >&2; exit 1; }

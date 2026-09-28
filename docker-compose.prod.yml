@@ -174,15 +174,27 @@ services:
     cap_drop: [ALL]
     # `backend` only: no route to the internet (see the header).
     networks: [backend]
-    # The image's healthcheck is the API's HTTP probe. The worker serves
-    # only its metrics exporter, which says nothing about whether jobs are
-    # running; arq checks the health key the worker refreshes in Redis.
+    # The image's healthcheck is the API's HTTP probe, and the worker has no
+    # HTTP server. It reads arq's own health key instead - the one
+    # app/worker.py names HEALTH_KEY - whose TTL is health_check_interval + 1,
+    # so the key existing IS the liveness signal.
+    #
+    # Not `arq --check`: that imports app.worker, and with it torch, which was
+    # measured at 41-90 s against a 10 s timeout. The probe failed on a worker
+    # that was answering perfectly, and every deployment timed out on it.
+    # `import redis` alone measured 2.5-4.6 s on a loaded host, hence 15 s.
     healthcheck:
-      test: ["CMD", "arq", "--check", "app.worker.WorkerSettings"]
-      interval: 60s
-      timeout: 10s
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['KP_REDIS_URL']).exists('knowpilot:worker-health') else 1)"
+      interval: 30s
+      timeout: 15s
       retries: 3
-      start_period: 120s
+      # 134 s measured to load the weights, while the API loaded its own copy
+      # on the same CPUs. Below that, a normal start looks like a failure.
+      start_period: 300s
     depends_on:
       model:
         condition: service_completed_successfully

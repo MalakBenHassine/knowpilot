@@ -79,9 +79,14 @@ scrapes are a text file the service writes to itself, and three gaps remained:
   deployment does not have. Adding one is a service and a secret; it is
   deliberately not done while nobody would read the mail.
 - Two more images to follow, both pinned by digest like the rest.
-- The worker's healthcheck is still `arq --check`, not its new port: the
-  exporter answers whether the process is alive, never whether jobs are
-  running.
+- The worker's healthcheck is not its new port: the exporter answers whether
+  the process is alive, never whether jobs are running. It reads arq's health
+  key instead, which the worker refreshes every sixty seconds with a TTL one
+  second longer - so the key existing means the worker reported in within the
+  minute. It used to run `arq --check`; that command imports the application
+  and torch with it, and measured 41 to 90 seconds on the deployment VM
+  against a 10-second probe timeout. A healthy worker could not be reported
+  healthy, and every deployment timed out on it. The key read measured 2.2 s.
 
 ## Revisit when
 
