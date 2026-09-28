@@ -15,8 +15,17 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/bin/knowpilot-update
 
-# Pulling three images, one of them 2.5 GB, over a domestic connection.
-TimeoutStartSec=1800
+# The FIRST deployment on a host downloads about 5 GB: three images, one of
+# them 2.5 GB, and then the job that fetches 2.2 GB of embedding weights from
+# the model hub. Measured on a 4.5 MB/s domestic link it took roughly twenty
+# minutes - inside the old 30-minute budget, but only just, and a slower link
+# would have been killed halfway with nothing to show for it.
+#
+# Two hours is a backstop, not a schedule. The deployer already bounds every
+# step it controls: 30 s on the GitHub API, three pull attempts, 300 s for the
+# containers to become healthy. This limit exists only for the case where
+# something hangs with no timeout of its own.
+TimeoutStartSec=7200
 
 # No Restart=. A run that failed has already rolled back and said why; a unit
 # that retries every thirty seconds turns one bad release into a loop, and
