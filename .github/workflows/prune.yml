@@ -8,10 +8,12 @@ name: Prune images
 # So the policy lives in .github/scripts/prune-images.py, it keeps releases,
 # signatures and moving tags, and THE JOB TESTS THE POLICY BEFORE IT RUNS IT.
 #
-# Requires a secret GHCR_CLEANUP_TOKEN: a fine-grained personal access token
-# with `packages: delete`. GITHUB_TOKEN cannot do this - deleting a
-# user-scoped package version is not a permission it can be granted. Without
-# the secret this workflow says so and stops, rather than failing every week.
+# Requires a secret GHCR_CLEANUP_TOKEN: a CLASSIC personal access token with
+# the scopes `read:packages` and `delete:packages`. Not a fine-grained one -
+# fine-grained tokens have no scope that deletes a user-scoped package
+# version, so the setting simply is not there to find. GITHUB_TOKEN cannot do
+# it either. Without the secret this workflow says so and stops, rather than
+# failing every week.
 
 on:
   schedule:
@@ -52,8 +54,10 @@ jobs:
         run: |
           if [ -z "${GH_TOKEN}" ]; then
             echo "::warning::GHCR_CLEANUP_TOKEN is not set; nothing was pruned."
-            echo "Create a fine-grained token with 'packages: delete' and add it"
-            echo "under Settings > Secrets and variables > Actions."
+            echo "Create a classic token (Settings > Developer settings > Personal"
+            echo "access tokens > Tokens (classic)) with read:packages and"
+            echo "delete:packages, then add it under Settings > Secrets and"
+            echo "variables > Actions as GHCR_CLEANUP_TOKEN."
             exit 0
           fi
 
