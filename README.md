@@ -2,7 +2,17 @@
 
 > A private, multi-user AI assistant that answers questions from your own documents, with source citations.
 
-**Status:** feature-complete v1, deployable to a single VM (docs/deploy.md).
+[![Backend](https://github.com/MalakBenHassine/knowpilot/actions/workflows/backend.yml/badge.svg)](https://github.com/MalakBenHassine/knowpilot/actions/workflows/backend.yml)
+[![Frontend](https://github.com/MalakBenHassine/knowpilot/actions/workflows/frontend.yml/badge.svg)](https://github.com/MalakBenHassine/knowpilot/actions/workflows/frontend.yml)
+[![Security](https://github.com/MalakBenHassine/knowpilot/actions/workflows/security.yml/badge.svg)](https://github.com/MalakBenHassine/knowpilot/actions/workflows/security.yml)
+[![CodeQL](https://github.com/MalakBenHassine/knowpilot/actions/workflows/codeql.yml/badge.svg)](https://github.com/MalakBenHassine/knowpilot/actions/workflows/codeql.yml)
+[![Quality gate](https://sonarcloud.io/api/project_badges/measure?project=MalakBenHassine_knowpilot&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=MalakBenHassine_knowpilot)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=MalakBenHassine_knowpilot&metric=coverage)](https://sonarcloud.io/summary/new_code?id=MalakBenHassine_knowpilot)
+[![Release](https://img.shields.io/github/v/release/MalakBenHassine/knowpilot)](https://github.com/MalakBenHassine/knowpilot/releases)
+
+**Status:** feature-complete v1. Published as signed multi-architecture images
+([v0.2.0](https://github.com/MalakBenHassine/knowpilot/releases)), deployable to a
+single VM ([docs/deploy.md](docs/deploy.md)).
 
 ## Features
 
@@ -14,7 +24,10 @@
   notice when an answer rests on something the documents never name
 - Accounts through Keycloak; every document, passage and question is scoped to
   its owner, down to the SQL
-- Daily question budgets and per-minute limits
+- Daily question budgets - 20 per person, 80 for the whole service - and a
+  limit of 10 requests a minute on asking and on uploading
+- A document too long to index is refused **before** the work, from a page
+  ceiling derived from the measured indexing rate, not guessed
 - Prometheus metrics from both processes, a Grafana dashboard kept in the
   repository, and alert rules that say what to do
 
@@ -27,8 +40,8 @@
 | Authentication | Keycloak (OpenID Connect), Backend-for-Frontend      |
 | RAG            | LangChain, BGE-M3 embeddings, pgvector, Groq LLM     |
 | Data           | PostgreSQL, Redis                                    |
-| DevSecOps      | GitHub Actions, SonarQube Cloud, CodeQL, Trivy, gitleaks, Dependabot |
-| Infrastructure | Docker Compose, Caddy, Let's Encrypt                 |
+| DevSecOps      | GitHub Actions, SonarQube Cloud, CodeQL, Trivy, gitleaks, shellcheck, cosign, Dependabot |
+| Infrastructure | Docker Compose, Caddy, Let's Encrypt; Kustomize manifests for Kubernetes |
 | Observability  | Prometheus, Grafana, alert rules                     |
 
 ## Running the services
@@ -40,9 +53,12 @@ docker compose ps             # all three must be "healthy"
 ```
 
 PostgreSQL (application database + Keycloak's own, isolated, database), Redis
-(BFF sessions) and Keycloak. Only Keycloak and PostgreSQL publish a port, bound
-to `127.0.0.1` so nothing is reachable from the local network. Keycloak's admin
-console: <http://localhost:8080>.
+(BFF sessions) and Keycloak. All three publish a port, and all three bind it to
+`127.0.0.1` - so they are reachable from this machine and from nothing else on
+the network. Keycloak's admin console: <http://localhost:8080>.
+
+In production none of them is published at all: Caddy is the only container
+with a port on the internet, and the rest talk over a private Docker network.
 
 `docker compose down` keeps the data, `docker compose down -v` deletes it.
 
@@ -54,14 +70,14 @@ uv sync
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
-- `GET /api/health/live` — liveness: is the process alive? Checks nothing else.
-- `GET /api/health/ready` — readiness: are the dependencies reachable? Returns
+- `GET /api/health/live` - liveness: is the process alive? Checks nothing else.
+- `GET /api/health/ready` - readiness: are the dependencies reachable? Returns
   `503` when one is not, so an orchestrator stops sending traffic instead of
   restarting the container.
 - Interactive docs at `/api/docs`, disabled when `KP_ENVIRONMENT=production`.
 
 The API contract lives in [docs/api/contract.md](docs/api/contract.md), and the
-reasoning behind the main technical choices in
+reasoning behind the main technical choices in the **22 ADRs** under
 [docs/adr/](docs/adr/README.md).
 
 ## Running the tests
@@ -72,12 +88,13 @@ uv run pytest                          # offline: no database, no key, no networ
 KP_RUN_DB_TESTS=1 uv run pytest        # also the PostgreSQL tests (docker compose up -d postgres)
 ```
 
-The database tests are the ones that matter most - tenant isolation through
-the real PGVectorStore, the keyword search, the context window, the subject
-check - so they are opt-in locally and MANDATORY in CI: the `database` job of
-the backend workflow starts pgvector, applies the migrations, checks that
-every migration can be rolled back and that the models match them, then runs
-the whole suite and fails if a single database test was skipped.
+**296 tests** run offline; with a database, **347** - and the 51 that were
+skipped are the ones that matter most: tenant isolation through the real
+PGVectorStore, the keyword search, the context window, the subject check. So
+they are opt-in locally and MANDATORY in CI: the `database` job of the backend
+workflow starts pgvector, applies the migrations, checks that every migration
+can be rolled back and that the models still match them (`alembic check`), then
+runs the whole suite and fails if a single database test was skipped.
 
 ## Evaluating the assistant
 
@@ -96,8 +113,8 @@ account.
 It is an evaluation, not a test. A failure here is a conversation, not a
 broken build: the quality it measures can move without a line of code
 changing - a new model version, a tuned threshold, a differently worded
-document. For the same reason it does not run in CI: it costs about nineteen
-questions of a daily budget of eighty-five, and it needs a real API key.
+document. For the same reason it does not run in CI: it spends about nineteen
+of the service's eighty daily questions, and it needs a real API key.
 
 ```bash
 uv run python -m evals.run a-value-read-with-its-date   # one case, to check one fix cheaply
@@ -157,24 +174,32 @@ k6 run perf/api.js                                    # the HTTP layer at 100 cl
 ```
 
 The numbers, the machine they came from and what they imply are in
-[docs/performance.md](docs/performance.md). Two of them matter more than the
-rest: the vector search is **flat** from 1 000 to 50 000 passages, and
-indexing runs at **0.25 pages per second** on a laptop CPU - which is how
-the page limit and the job timeout were found to contradict each other.
+[docs/performance.md](docs/performance.md). Three of them changed the code:
+
+- The vector search is **flat** from 1 000 to 50 000 passages - the HNSW index
+  doing what it exists for.
+- Indexing runs at **0.25 pages per second** on a laptop CPU, which is how the
+  page limit and the worker's job timeout were found to contradict each other.
+  The ceiling is now derived from that rate.
+- Writing an upload to disk blocked the event loop for the **whole file**: a
+  monitor ticking every millisecond ran **once** during a 20 MB upload. The
+  write now goes through `anyio`, and the loop runs 46 times instead.
 
 ## Quality and security checks
 
-Every pull request runs these, and each one blocks the merge:
+Seven workflows. Every push and every pull request runs these:
 
 | Check | Tool | A failure means |
 | --- | --- | --- |
-| Lint, format, types | ruff, mypy, ESLint, tsc | the code does not match the rules the rest of the code follows |
+| Lint, format, types | ruff, mypy, oxlint, `tsc` | the code does not match the rules the rest of the code follows |
 | Tests | pytest offline, pytest against a real pgvector, vitest | behaviour changed |
-| Quality gate | SonarQube Cloud | new code under 80% coverage, a bug, a smell, or duplication |
+| Quality gate | SonarQube Cloud, with `sonar.qualitygate.wait` | new code under 80% coverage, a bug, a smell, or duplication - and the job fails, it does not merely report |
 | SAST | CodeQL, `security-extended` | a value reaches a dangerous sink - injection, path traversal |
 | Dependencies | Trivy (lock files), Dependabot | a known HIGH or CRITICAL vulnerability that has a fix |
 | Configuration | Trivy (Compose, Dockerfiles) | an insecure setting in the infrastructure files |
 | Secrets | gitleaks, over the whole history | a credential in any commit, including one later removed |
+| Shell | shellcheck, over every `*.sh` in the repository | a quoting bug in a script that runs as root on a server or against a cluster |
+| Kubernetes | `kubectl kustomize`, kubeconform `-strict`, Trivy config | the manifests do not assemble, or a field the schema does not define was silently ignored |
 
 Sonar and CodeQL are not redundant: Sonar grades the code, CodeQL follows
 data through it. The first finds what is badly written, the second finds what
@@ -184,19 +209,44 @@ Snyk is deliberately absent. Trivy already reads the same lock files and
 Dependabot already opens the upgrade pull requests; a third scanner over the
 same dependencies produces duplicate findings, not more safety.
 
-And on `main`, before an image can be released:
+## Releasing
 
-| Check | Tool | A failure means |
+The Release workflow runs on a **version tag**, never on a commit: publishing
+is a decision, not a side effect of merging. Releasing on `main` once shipped
+images from a commit whose tests had failed, because the workflows run in
+parallel and nothing waited.
+
+```bash
+git tag -a v0.3.0 -m "what this release is"
+git push origin v0.3.0
+```
+
+Four stages, and each one can stop the next:
+
+| Stage | What it does | What it refuses |
 | --- | --- | --- |
-| Image vulnerabilities | Trivy, on each architecture's digest | a HIGH or CRITICAL with a fix reached an image |
-| Signature | cosign, keyless, verified in the same job | the release cannot prove what it built |
+| `build` | six images - three services, x86 and ARM, on native runners - pushed **by digest, with no tag** | - |
+| `scan` | Trivy on each architecture's digest | a HIGH or CRITICAL with a fix |
+| `publish` | joins both architectures under one tag, signs with cosign keyless, verifies its own signature | a signing setup that cannot be verified |
+| `announce` | re-verifies all three signatures from a job holding no signing token, then writes the GitHub Release | a digest or an identity that does not hold up |
 
-The images are pushed **by digest, without a tag**: nothing can pull them
-until the scan passes and the tags are written. The tag is the gate, not the
-push. What the gate accepts anyway lives in
+**The tag is the gate, not the push.** Nothing can pull an image until the scan
+passes and the tags are written. What the gate accepts anyway lives in
 [.trivyignore.yaml](.trivyignore.yaml) - each entry names a CVE, says why this
 deployment can carry it, and **expires**, so it comes back for review instead
 of being forgotten.
+
+Anyone can check a published image, with **cosign 3 or newer**:
+
+```bash
+cosign verify ghcr.io/malakbenhassine/knowpilot-backend:v0.2.0 \
+  --certificate-identity https://github.com/MalakBenHassine/knowpilot/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+A cosign 2.x client answers `no signatures found` - which reads like *there is
+no signature* and means *there is one and I cannot read it*. The signatures use
+the bundle format cosign 3 introduced.
 
 ## Watching it
 
@@ -204,14 +254,16 @@ of being forgotten.
 docker compose -f docker-compose.prod.yml up -d prometheus grafana
 ```
 
-Two scrape targets, because KnowPilot is two processes that fail
-independently: the API serves its own `/metrics`, and the worker opens a
-second exporter. **That second one is the point** - the API can answer every
-request perfectly while the worker is dead and every upload rots in
-`processing` behind a spinner nobody can stop. No HTTP metric of the API
-would ever say so.
+Prometheus scrapes **two KnowPilot targets**, because KnowPilot is two
+processes that fail independently: the API serves its own `/metrics`, and the
+worker opens a second exporter on port 9100. (It also scrapes itself, which is
+how you find out Prometheus is the thing that died.)
 
-The data source, the dashboard and the seven alert rules are **files**
+**That second target is the point** - the API can answer every request
+perfectly while the worker is dead and every upload rots in `processing`
+behind a spinner nobody can stop. No HTTP metric of the API would ever say so.
+
+The data source, the dashboard and the **seven alert rules** are **files**
 ([infra/grafana/](infra/grafana/), [infra/prometheus/](infra/prometheus/)),
 mounted read-only: a Grafana that loses its volume comes back identical, and
 what it shows is reviewable in a pull request. The dashboard JSON is
@@ -228,10 +280,14 @@ they sit on their own network and why there is no Alertmanager yet, is in
 
 One VM, Docker Compose, Caddy for HTTPS: [docs/deploy.md](docs/deploy.md) is
 the full procedure, and [ADR-0020](docs/adr/0020-single-vm-compose-deployment.md)
-the reasoning. Images are built for x86 and ARM by the Release workflow, which
-runs on a **version tag** and not on every commit: publishing is a decision,
-not a side effect of merging. They are pulled by commit sha, so production
-runs exactly what CI built - and their signature says so.
+the reasoning. Images are pulled by commit sha, so production runs exactly what
+CI built - and their signature says so.
+
+This is **continuous delivery, not continuous deployment**, and that is a
+choice. Every tag produces an artifact that is ready to deploy and a procedure
+that is written down; nothing pushes it to a machine on its own. Deploying from
+CI means storing a credential that opens production, and ADR-0020 chose the
+other direction: the server pulls.
 
 The host it runs on is hardened by
 [infra/server/harden.sh](infra/server/harden.sh): deny-by-default firewall,
@@ -241,10 +297,12 @@ refuses to disable password authentication when no key is installed
 anywhere, which on a cloud instance with no console is a mistake with no
 way back.
 
-The same system also exists as Kubernetes objects, in [k8s/](k8s/): one
+The same system also exists as **32 Kubernetes objects**, in [k8s/](k8s/): one
 Kustomize base, a local overlay, and a script that **proves** the
 NetworkPolicies by opening connections from inside the cluster - because a
-policy applies cleanly and blocks nothing on a CNI that ignores them.
-Production stays on Compose, and
+policy applies cleanly and blocks nothing on a CNI that ignores them. CI
+assembles them, validates them against the Kubernetes schemas in `-strict`
+mode and scans the result; the isolation test was run on a real k3d cluster
+and passed seven probes out of seven, twice. Production stays on Compose, and
 [ADR-0022](docs/adr/0022-kubernetes-manifests.md) says why, including the
 one thing Compose expresses that Kubernetes has no equivalent for.
