@@ -42,10 +42,22 @@ fail() { printf 'REFUSED: %s\n' "$1" >&2; exit 1; }
 LOCK="/tmp/knowpilot-update.lock"
 if [[ "${KP_LOCKED:-}" != "1" ]]; then
     export KP_LOCKED=1
-    exec flock -n "${LOCK}" "$0" "$@" || {
-        echo "another update is already running"
+    # NOT `exec flock ... || ...`: exec REPLACES this shell, so when flock
+    # cannot take the lock there is no shell left to run the fallback. The
+    # process exits 1 with no output, and the caller sees a deployer that
+    # refused for no stated reason. Found by Ansible's dry run colliding with
+    # a real deployment already in progress.
+    # -E 66 makes "lock is busy" distinguishable from the script's own failure.
+    # `|| status=$?` and not a bare call: set -e would abort on flock's non-zero
+    # exit before the code below could read it - which is how the first version
+    # of this fix still exited 66 in silence.
+    status=0
+    flock -n -E 66 "${LOCK}" "$0" "$@" || status=$?
+    if (( status == 66 )); then
+        say "another update is already running; nothing to do"
         exit 0
-    }
+    fi
+    exit "${status}"
 fi
 
 command -v docker >/dev/null || fail "docker is not installed"
