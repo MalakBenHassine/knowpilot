@@ -12,6 +12,14 @@
     checksum: "sha256:{{ cosign_sha256 }}"
     mode: "0755"
   when: ansible_facts['architecture'] == "x86_64"
+  # 156 MB over someone else's network. Seen for real: a truncated read at
+  # 154 759 765 of 156 288 179 bytes. A lost packet is not a reason to abandon
+  # a provisioning run, and the checksum above means a retry cannot smuggle in
+  # a partial or different binary.
+  register: knowpilot_cosign
+  until: knowpilot_cosign is succeeded
+  retries: 3
+  delay: 5
 
 - name: Refuse to guess on another architecture
   ansible.builtin.assert:

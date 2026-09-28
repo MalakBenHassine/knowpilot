@@ -33,6 +33,12 @@
         dest: /etc/apt/keyrings/docker.asc
         mode: "0644"
         force: false
+      # Same reasoning as cosign: a download over someone else's network is
+      # allowed to fail once without ending the run.
+      register: base_docker_key
+      until: base_docker_key is succeeded
+      retries: 3
+      delay: 5
 
     # deb822_repository, not apt_repository: the latter is deprecated and is
     # removed in ansible-core 2.25, and a provisioning playbook that breaks

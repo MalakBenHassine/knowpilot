@@ -17,7 +17,13 @@
 set -euo pipefail
 
 REPOSITORY="${KP_GITHUB_REPOSITORY:-MalakBenHassine/knowpilot}"
-PROJECT_DIR="${KP_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Resolve the symlink FIRST. systemd calls /usr/local/bin/knowpilot-update,
+# which points into the checkout, so BASH_SOURCE is the LINK: its directory is
+# /usr/local/bin and two levels up is /usr, where no compose file has ever
+# lived. Found by running it, not by reading it: "REFUSED: no
+# /usr/docker-compose.prod.yml".
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_DIR="${KP_PROJECT_DIR:-$(cd "$(dirname "${SELF}")/../.." && pwd)}"
 ENV_FILE="${KP_ENV_FILE:-${PROJECT_DIR}/.env.production}"
 COMPOSE_FILE="${KP_COMPOSE_FILE:-${PROJECT_DIR}/docker-compose.prod.yml}"
 ISSUER="https://token.actions.githubusercontent.com"
