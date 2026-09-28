@@ -187,7 +187,7 @@ The numbers, the machine they came from and what they imply are in
 
 ## Quality and security checks
 
-Seven workflows. Every push and every pull request runs these:
+Nine workflows. Every push and every pull request runs these seven:
 
 | Check | Tool | A failure means |
 | --- | --- | --- |
@@ -208,6 +208,19 @@ is exploitable.
 Snyk is deliberately absent. Trivy already reads the same lock files and
 Dependabot already opens the upgrade pull requests; a third scanner over the
 same dependencies produces duplicate findings, not more safety.
+
+Two more do not run on a push:
+
+- **Alert** opens a GitHub issue when a workflow fails on `main` or on a tag,
+  and comments on the existing one rather than opening a second. Nobody
+  watches a green tick, and forty issues for one broken build is how a team
+  learns to ignore them.
+- **Prune** deletes per-commit image versions beyond the five most recent,
+  weekly. It keeps releases, cosign signatures, moving tags - and every
+  **untagged** version, because those are the per-architecture manifests a
+  multi-arch index points at, and deleting them breaks the tag. The policy
+  lives in [.github/scripts/prune-images.py](.github/scripts/prune-images.py)
+  and the job **tests it before running it**.
 
 ## Releasing
 
@@ -283,11 +296,19 @@ the full procedure, and [ADR-0020](docs/adr/0020-single-vm-compose-deployment.md
 the reasoning. Images are pulled by commit sha, so production runs exactly what
 CI built - and their signature says so.
 
-This is **continuous delivery, not continuous deployment**, and that is a
-choice. Every tag produces an artifact that is ready to deploy and a procedure
-that is written down; nothing pushes it to a machine on its own. Deploying from
-CI means storing a credential that opens production, and ADR-0020 chose the
-other direction: the server pulls.
+Deployment is **continuous, and pull-based**
+([ADR-0023](docs/adr/0023-pull-based-deployment.md)). A systemd timer runs
+[infra/server/update.sh](infra/server/update.sh) every five minutes: it asks
+the public Releases API what the newest version is, **verifies the cosign
+signature of all three images on the machine that will run them**, deploys,
+waits for every healthcheck, and writes the previous tag back if one of them
+never turns healthy.
+
+Nothing in GitHub holds a credential that opens the server, because nothing in
+GitHub ever connects to it. A compromised workflow can publish an image; it
+cannot sign one as the release workflow, and an image that fails that check is
+one this script refuses to pull. The supply chain closes on the machine that
+executes the code, not on the one that built it.
 
 The host it runs on is hardened by
 [infra/server/harden.sh](infra/server/harden.sh): deny-by-default firewall,

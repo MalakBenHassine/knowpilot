@@ -1,0 +1,74 @@
+name: Prune images
+
+# Old per-commit images pile up in the registry for ever. Nothing deletes them
+# by itself, and "delete everything untagged" - the first advice anyone finds -
+# destroys multi-architecture images, because the amd64 and arm64 manifests an
+# index points at carry no tags of their own.
+#
+# So the policy lives in .github/scripts/prune-images.py, it keeps releases,
+# signatures and moving tags, and THE JOB TESTS THE POLICY BEFORE IT RUNS IT.
+#
+# Requires a secret GHCR_CLEANUP_TOKEN: a fine-grained personal access token
+# with `packages: delete`. GITHUB_TOKEN cannot do this - deleting a
+# user-scoped package version is not a permission it can be granted. Without
+# the secret this workflow says so and stops, rather than failing every week.
+
+on:
+  schedule:
+    # Sunday, early. Nothing else runs then, and a mistake has the whole week
+    # to be noticed rather than landing in the middle of a release.
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Delete for real (unchecked: only say what would go)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prune-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune old image versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The policy decides what is deleted, so it is checked first, every time.
+      # A prune whose rules were never exercised is a prune nobody should run.
+      - name: Test the policy
+        run: python3 .github/scripts/prune-images.py --self-test
+
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_CLEANUP_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::GHCR_CLEANUP_TOKEN is not set; nothing was pruned."
+            echo "Create a fine-grained token with 'packages: delete' and add it"
+            echo "under Settings > Secrets and variables > Actions."
+            exit 0
+          fi
+
+          # A scheduled run deletes; a manual run only reports unless asked.
+          mode=""
+          if [ "${{ github.event_name }}" = "schedule" ] || \
+             [ "${{ inputs.apply }}" = "true" ]; then
+            mode="--apply"
+          else
+            echo "Dry run: nothing will be deleted."
+          fi
+
+          for package in backend frontend keycloak; do
+            python3 .github/scripts/prune-images.py \
+              --owner "${OWNER,,}" \
+              --package "knowpilot-${package}" \
+              --keep 5 ${mode}
+          done
