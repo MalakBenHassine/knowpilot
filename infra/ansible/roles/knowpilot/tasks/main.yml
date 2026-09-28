@@ -98,6 +98,35 @@
   ansible.builtin.debug:
     var: knowpilot_dry_run.stdout_lines
 
+# Provisioning, not deployment: declarative, idempotent, and exactly what this
+# playbook is for. It was a manual step in docs/deploy.md, and a manual step is
+# a step that gets forgotten - this host ran for an hour with a login that
+# answered 500 over a realm that was a 404.
+- name: Create the realm and the BFF client
+  ansible.builtin.command: infra/keycloak/setup-realm.sh
+  args:
+    chdir: "{{ knowpilot_directory }}"
+  environment:
+    KP_ENV_FILE: .env.production
+    KP_COMPOSE_FILE: docker-compose.prod.yml
+  register: knowpilot_realm
+  # Before the first deployment Keycloak is not running and this cannot work.
+  # That is not a failure of the playbook, so it says so and carries on.
+  failed_when: false
+  changed_when: knowpilot_realm.rc == 0
+  # The script prints a generated client secret when the env file has none.
+  # fill-secrets.sh has already put one there, so that branch does not run -
+  # but an Ansible log is not the place to find out otherwise.
+  no_log: true
+
+- name: Say what to do when the realm could not be created
+  ansible.builtin.debug:
+    msg:
+      - "Keycloak did not answer, so the realm was NOT created."
+      - "Expected before the first deployment. Run this playbook again once"
+      - "the timer has deployed, or the login answers 500 over a 404."
+  when: knowpilot_realm.rc != 0
+
 - name: Start the timer
   ansible.builtin.systemd_service:
     name: knowpilot-update.timer
