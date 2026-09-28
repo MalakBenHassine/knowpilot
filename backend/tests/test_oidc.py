@@ -8,6 +8,7 @@ redirect target, missing PKCE, weak challenge method).
 from urllib.parse import parse_qs, urlparse
 
 import anyio
+import pytest
 
 from app.core.config import Settings
 from app.core.oidc import OidcClient, pkce_challenge
@@ -66,3 +67,33 @@ def test_pkce_challenge_is_a_sha256_digest() -> None:
     assert len(challenge) == 43
     assert "=" not in challenge
     assert challenge != "a-very-long-random-verifier-value"
+
+
+def test_a_configured_bundle_is_what_the_client_verifies_against(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local CA is trusted for THIS client, and only through this setting.
+
+    The API reaches Keycloak through the public url, so on a host where Caddy
+    signs locally the login fails with CERTIFICATE_VERIFY_FAILED unless the
+    bundle is passed - while every health check still passes, because
+    readiness never touches OIDC. That is what this guards.
+    """
+    captured: dict[str, object] = {}
+
+    class Recorder:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("app.core.oidc.httpx.AsyncClient", Recorder)
+
+    OidcClient(Settings(oidc_ca_bundle="/ca-trust/root.crt"))._client(5)
+    verify = captured["verify"]
+    assert verify == "/ca-trust/root.crt"
+
+    # And an unset bundle must leave verification exactly as it was: this is
+    # the public deployment, the case nobody exercises by hand.
+    captured.clear()
+    OidcClient(Settings())._client(5)
+    verify = captured["verify"]
+    assert verify is True

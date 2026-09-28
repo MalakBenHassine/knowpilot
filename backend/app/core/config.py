@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     oidc_client_id: str = "knowpilot-bff"
     # No default: the application must not start without it in production.
     oidc_client_secret: str = ""
+    # A certificate authority to trust FOR THE OIDC HOP ONLY, empty otherwise.
+    #
+    # The API reaches Keycloak through the PUBLIC url, because the issuer in
+    # every token must be the one browsers see. On a public host that url
+    # carries a Let's Encrypt certificate and nothing is needed here. On a
+    # private address Caddy signs with its own CA (KP_TLS in
+    # docker-compose.prod.yml), which no container trusts - and the login then
+    # fails with CERTIFICATE_VERIFY_FAILED while every health check passes,
+    # because readiness never touches OIDC. Observed on a real deployment.
+    #
+    # Scoped to this one client deliberately: trusting a local CA globally
+    # would also trust it for calls that leave the machine.
+    oidc_ca_bundle: str = ""
 
     # --- Session (BFF) ---
     redis_url: str = "redis://localhost:6379/0"

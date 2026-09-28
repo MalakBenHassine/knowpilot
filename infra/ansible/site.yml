@@ -38,6 +38,12 @@
     # and asks Let's Encrypt everywhere else. Deciding this from the address
     # beats asking the operator to remember which case they are in.
     knowpilot_tls: "{{ 'tls internal' if knowpilot_ip is match('^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)') else '' }}"
+    # Set when, and only when, Caddy signs locally - the same condition because
+    # it is the same fact. The API reaches Keycloak through the public url, so
+    # a certificate nothing else trusts has to be handed to the one container
+    # that must verify it. Without this the login returns 500 with
+    # CERTIFICATE_VERIFY_FAILED while every health check passes.
+    knowpilot_oidc_ca_bundle: "{{ '/ca-trust/root.crt' if knowpilot_tls else '' }}"
     cosign_version: v3.0.2
     cosign_sha256: 46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd
     # The API and the worker each hold the 2.2 GB embedding model.

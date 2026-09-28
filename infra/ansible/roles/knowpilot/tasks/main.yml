@@ -60,6 +60,7 @@
     - {key: KP_IMAGE_REGISTRY, value: "{{ knowpilot_registry }}"}
     - {key: KP_DOMAIN, value: "{{ knowpilot_domain }}"}
     - {key: KP_TLS, value: "{{ knowpilot_tls }}"}
+    - {key: KP_OIDC_CA_BUNDLE, value: "{{ knowpilot_oidc_ca_bundle }}"}
   loop_control:
     label: "{{ item.key }}"
 

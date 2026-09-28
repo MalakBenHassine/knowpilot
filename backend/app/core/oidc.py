@@ -39,11 +39,20 @@ class OidcClient:
         self._jwks: Any = None
         self._jwks_fetched_at = 0.0
 
+    def _client(self, timeout: int) -> httpx.AsyncClient:
+        """One place decides what this client trusts.
+
+        `verify` takes a path to a bundle or True for the system store, so an
+        unset setting keeps the default behaviour exactly as it was.
+        """
+        verify: str | bool = self._settings.oidc_ca_bundle or True
+        return httpx.AsyncClient(timeout=timeout, verify=verify)
+
     async def metadata(self) -> dict[str, Any]:
         if self._metadata and time.time() - self._metadata_fetched_at < _CACHE_TTL_SECONDS:
             return self._metadata
         url = f"{self._settings.oidc_issuer}/.well-known/openid-configuration"
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with self._client(5) as client:
             response = await client.get(url)
         if response.status_code != 200:
             raise OidcError("discovery document unavailable")
@@ -83,7 +92,7 @@ class OidcClient:
     async def exchange_code(self, code: str, code_verifier: str) -> dict[str, Any]:
         """Swaps the code for tokens, server to server, with the client secret."""
         metadata = await self.metadata()
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with self._client(10) as client:
             response = await client.post(
                 metadata["token_endpoint"],
                 data={
@@ -103,7 +112,7 @@ class OidcClient:
         if self._jwks is not None and time.time() - self._jwks_fetched_at < _CACHE_TTL_SECONDS:
             return self._jwks
         metadata = await self.metadata()
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with self._client(5) as client:
             response = await client.get(metadata["jwks_uri"])
         if response.status_code != 200:
             raise OidcError("jwks unavailable")

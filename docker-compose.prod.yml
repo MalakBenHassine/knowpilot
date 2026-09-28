@@ -120,6 +120,42 @@ services:
           - ${KP_DOMAIN}
     mem_limit: 256m
 
+  # Copies Caddy's local root CERTIFICATE - and never its key - where the API
+  # can read it.
+  #
+  # The API talks to Keycloak through the public url, so on a private address
+  # it must trust the CA Caddy invented. That CA's private key sits in
+  # caddy_data next to the certificate, and handing the API that volume would
+  # hand it the power to sign any name. One file crosses, through a volume of
+  # its own.
+  ca-export:
+    <<: *hardened
+    image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        if [ -z "$${KP_TLS}" ]; then
+        echo "public certificate: nothing to export"; exit 0; fi;
+        n=0;
+        while [ ! -f /ca/caddy/pki/authorities/local/root.crt ]; do
+        n=$$((n+1));
+        if [ "$$n" -gt 60 ]; then
+        echo "KP_TLS is set but Caddy wrote no local CA in 60s" >&2; exit 1; fi;
+        sleep 1; done;
+        cp /ca/caddy/pki/authorities/local/root.crt /export/root.crt;
+        echo "exported Caddy local root certificate"
+    environment:
+      KP_TLS: ${KP_TLS:-}
+    volumes:
+      - caddy_data:/ca:ro
+      - ca_trust:/export
+    networks: [edge]
+    cap_drop: [ALL]
+    restart: "no"
+    depends_on:
+      caddy:
+        condition: service_started
+
   frontend:
     <<: *hardened
     image: ${KP_IMAGE_REGISTRY:-knowpilot}/knowpilot-frontend:${KP_IMAGE_TAG:-local}
@@ -140,9 +176,13 @@ services:
     <<: [*hardened, *backend-image]
     environment:
       <<: *backend-env
+      # Trusted for the Keycloak hop ONLY, never globally: a local CA must not
+      # be trusted for calls that leave this machine. Empty on a public host.
+      KP_OIDC_CA_BUNDLE: ${KP_OIDC_CA_BUNDLE:-}
     volumes:
       - models:/models:ro
       - uploads:/data/uploads
+      - ca_trust:/ca-trust:ro
     # The code cannot be modified at runtime, by a bug or by an attacker.
     # /tmp is the one writable place, in memory, gone at every restart.
     read_only: true
@@ -157,6 +197,10 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      # Starting before the certificate is there would give a login that fails
+      # until the first restart - the worst kind, because nothing looks broken.
+      ca-export:
+        condition: service_completed_successfully
     # 2.2 GB of weights, and headroom for a batch of questions.
     mem_limit: 3g
 
@@ -431,5 +475,7 @@ volumes:
   uploads:
   caddy_data:
   caddy_config:
+  # Holds one file: Caddy's local root certificate. Never its key.
+  ca_trust:
   prometheus_data:
   grafana_data:
