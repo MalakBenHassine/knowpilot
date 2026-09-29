@@ -31,6 +31,28 @@ vulnerabilities:
       Bouncy Castle 1.84, same distribution and same reason as CVE-2026-8763.
     expired_at: 2026-12-31
 
+  - id: CVE-2026-68497
+    statement: >-
+      jackson-databind 2.21.5, inside the Keycloak distribution twice over: the
+      server's own runtime jar, and again inside keycloak-admin-cli. A CPU
+      denial of service through unbounded numeric parsing. Fixed upstream in
+      2.21.6, and 26.7.4 is the newest Keycloak there is, so no distribution
+      carries the fix today. `ignore-unfixed` does not catch this one precisely
+      because the LIBRARY has a fix - what has no fix is the thing we deploy.
+      NOT claimed unreachable. What bounds it is the edge and the protocol: the
+      admin console and the master realm answer 404 in infra/caddy/Caddyfile,
+      so an outsider reaches only the login and token endpoints, and those take
+      form-encoded bodies rather than JSON. The JSON surface behind them -
+      client registration, pushed authorization requests, the account API -
+      needs a client secret or a session first. Caddy now caps the whole
+      /auth/* route at 128 KB, which removes the cheap form of the attack: a
+      megabyte-long numeric literal. The worst case left is CPU exhaustion on
+      one VM - availability, with nothing read and nothing altered.
+      This entry expires sooner than the others on purpose. Keycloak published
+      four patch releases in ten weeks, so unlike Netty or FreeMarker below
+      there is something to wait for.
+    expired_at: 2026-11-30
+
   - id: CVE-2026-75595
     statement: >-
       Netty 4.1.136, inside the Keycloak distribution. Fixed upstream in
