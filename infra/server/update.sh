@@ -7,13 +7,16 @@
 # A compromised workflow cannot deploy here - it can only publish an image,
 # and an image it cannot sign is one this script refuses.
 #
-# Run it from a systemd timer (infra/server/knowpilot-update.timer), or by
-# hand. It is idempotent: with no new release it does nothing at all.
+# It converges. Every run leaves this host running the newest release that has
+# proved healthy here - by deploying it, by reconciling a stack that has fallen
+# over since, or by putting the previous release back.
 #
-#   ./infra/server/update.sh              # deploy the newest release
+# Run it from a systemd timer (infra/server/knowpilot-update.timer), or by hand.
+#
+#   ./infra/server/update.sh              # converge on the newest release
 #   KP_DRY_RUN=1 ./infra/server/update.sh # say what it would do, change nothing
 #
-# Exit codes: 0 nothing to do or deployed; 1 refused or rolled back.
+# Exit codes: 0 nothing to do, deployed, or reconciled; 1 refused or rolled back.
 set -euo pipefail
 
 REPOSITORY="${KP_GITHUB_REPOSITORY:-MalakBenHassine/knowpilot}"
@@ -32,9 +35,15 @@ IMAGES=(backend frontend keycloak)
 # Must exceed the longest start_period in the compose file, plus a few probe
 # intervals. Both the API and the worker declare 300 s, because each loads
 # 2.2 GB of weights - measured at 134 s with the two competing for the same
-# CPUs. Five minutes total, the old value, expired while a healthy stack was
+# CPUs. Five minutes total, the first value, expired while a healthy stack was
 # still legitimately starting, and the deployer rolled back a good release.
-HEALTH_TIMEOUT="${KP_HEALTH_TIMEOUT:-900}"
+#
+# Thirty minutes, not fifteen: a full cold start was measured at over nine
+# minutes on this hardware, and the model load alone at 42, 77, 134 and 351 s
+# on four separate runs. Fifteen minutes passed by a margin thin enough that a
+# slower disk or a busier host would spend it, and the cost of being wrong is
+# not a slow deployment - it is a rollback of a release that was fine.
+HEALTH_TIMEOUT="${KP_HEALTH_TIMEOUT:-1800}"
 
 say() { printf '==> %s\n' "$1"; }
 fail() { printf 'REFUSED: %s\n' "$1" >&2; exit 1; }
@@ -77,6 +86,7 @@ read_env() {
 }
 
 REGISTRY="$(read_env KP_IMAGE_REGISTRY)"
+[[ -n "${REGISTRY}" ]] || fail "KP_IMAGE_REGISTRY is not set in ${ENV_FILE}"
 
 # KP_IMAGE_TAG in the env file is what compose SHOULD run - it has to be
 # written before `compose pull`, because compose reads it to know what to pull.
@@ -92,57 +102,20 @@ REGISTRY="$(read_env KP_IMAGE_REGISTRY)"
 # a host in that state must deploy, not inherit the belief that broke it.
 STATE_FILE="${KP_STATE_FILE:-/var/lib/knowpilot/deployed}"
 CURRENT="$(cat "${STATE_FILE}" 2>/dev/null || true)"
-[[ -n "${REGISTRY}" ]] || fail "KP_IMAGE_REGISTRY is not set in ${ENV_FILE}"
 
-# --- what is the newest release? --------------------------------------------
-say "Asking ${REPOSITORY} for its latest release"
-# A server with no route out, a rate limit, a repository that moved: all
-# three arrive here as a curl exit code, and `set -e` would end the run on
-# a bare number. A timer that fires every five minutes deserves a sentence.
-if ! response=$(curl -fsSL --max-time 30 \
-    -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null); then
-    fail "cannot reach the GitHub API for ${REPOSITORY} - offline, rate-limited, or no such repository"
-fi
-LATEST=$(printf '%s' "${response}" \
-    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+# Releases that did not become healthy on this host, one tag per line.
+#
+# A release that failed to start will not start in five minutes either, and
+# without this file it is retried at every tick of the timer: pull 2.5 GB, take
+# the stack down for the whole health timeout, roll back, repeat, for ever. A
+# broken release would not cost one failed deployment but a permanent cycle of
+# outages - worse than deploying nothing at all.
+#
+# Image tags are immutable here, so the cure for a bad release is the next
+# release, which is not in this file. Clearing it is a deliberate act: rm it.
+FAILED_FILE="${KP_FAILED_FILE:-/var/lib/knowpilot/failed}"
 
-# The tag names the images and the signing identity. Anything other than a
-# version is either an API error or something a reader would not expect to be
-# deployed, and both deserve a stop rather than a guess.
-[[ "${LATEST}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "unexpected tag from the API: '${LATEST}'"
-
-echo "    deployed: ${CURRENT:-<none>}"
-echo "    latest:   ${LATEST}"
-
-if [[ "${CURRENT}" == "${LATEST}" ]]; then
-    say "Already on ${LATEST}; nothing to do"
-    exit 0
-fi
-
-# --- the signature decides ---------------------------------------------------
-# Verified HERE, on the machine that will run the code - not only in the
-# workflow that built it. This is where a swapped image in the registry is
-# caught, and the only place where catching it still prevents anything.
-IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@refs/tags/${LATEST}"
-say "Verifying the signature of each image for ${LATEST}"
-for image in "${IMAGES[@]}"; do
-    reference="${REGISTRY}/knowpilot-${image}:${LATEST}"
-    if cosign verify "${reference}" \
-        --certificate-identity "${IDENTITY}" \
-        --certificate-oidc-issuer "${ISSUER}" >/dev/null 2>&1; then
-        echo "    ok  ${reference}"
-    else
-        fail "${reference} is not signed by ${IDENTITY} - NOT deploying"
-    fi
-done
-
-if [[ -n "${KP_DRY_RUN:-}" ]]; then
-    say "Dry run: would deploy ${LATEST}. Nothing changed."
-    exit 0
-fi
-
-# --- deploy ------------------------------------------------------------------
+# --- the pieces -------------------------------------------------------------
 compose() { docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"; }
 
 write_tag() {
@@ -163,42 +136,12 @@ write_tag() {
 # .env.production is git-ignored, so --force cannot take the secrets with it.
 checkout() {
     [[ -d "${PROJECT_DIR}/.git" ]] || return 0
-    git -C "${PROJECT_DIR}" fetch --tags --quiet origin         || fail "cannot fetch ${REPOSITORY} into ${PROJECT_DIR}"
-    git -C "${PROJECT_DIR}" checkout --force --quiet "$1"         || fail "${PROJECT_DIR} has no $1 to check out"
+    git -C "${PROJECT_DIR}" fetch --tags --quiet origin \
+        || fail "cannot fetch ${REPOSITORY} into ${PROJECT_DIR}"
+    git -C "${PROJECT_DIR}" checkout --force --quiet "$1" \
+        || fail "${PROJECT_DIR} has no $1 to check out"
 }
 
-# Put the env file back the way it was, so a failed attempt does not leave
-# compose pointing at a tag this host never managed to run.
-restore_tag() { [[ -n "${CURRENT}" ]] && write_tag "${CURRENT}"; return 0; }
-
-say "Deploying ${LATEST}"
-checkout "${LATEST}"
-write_tag "${LATEST}"
-
-# 2.5 GB over someone else's network. Seen for real: a reset after ninety
-# minutes of pulling. One lost connection is not a reason to give up on a
-# release - and the signatures were verified above, so a retry cannot fetch
-# anything else.
-pulled=""
-for attempt in 1 2 3; do
-    if compose pull --quiet; then
-        pulled=1
-        break
-    fi
-    echo "    pull attempt ${attempt} of 3 failed" >&2
-    sleep 30
-done
-if [[ -z "${pulled}" ]]; then
-    restore_tag
-    fail "could not pull the images for ${LATEST} after three attempts"
-fi
-
-compose up -d --remove-orphans || {
-    restore_tag
-    fail "compose refused to start ${LATEST}"
-}
-
-# --- did it come up? ---------------------------------------------------------
 # Every container that declares a healthcheck must reach `healthy`. A container
 # that only says `running` says nothing: a process can be up and refusing every
 # request, which is the failure this whole script exists to catch.
@@ -225,15 +168,148 @@ unhealthy() {
     ' <<< "${rows}"
 }
 
-say "Waiting up to ${HEALTH_TIMEOUT}s for the containers to become healthy"
-deadline=$(( SECONDS + HEALTH_TIMEOUT ))
-while (( SECONDS < deadline )); do
+# Prints nothing once everything is healthy; prints what is still not healthy
+# when the deadline passes. The caller decides what that means, because it
+# means different things during a deployment and during a reconcile.
+wait_healthy() {
+    local deadline pending
+    deadline=$(( SECONDS + HEALTH_TIMEOUT ))
+    while (( SECONDS < deadline )); do
+        pending="$(unhealthy)"
+        [[ -z "${pending}" ]] && return 0
+        sleep 5
+    done
+    unhealthy
+}
+
+quarantine() {
+    mkdir -p "$(dirname "${FAILED_FILE}")"
+    printf '%s\n' "$1" >> "${FAILED_FILE}"
+    say "Recorded $1 as failed in ${FAILED_FILE}; it will not be retried"
+}
+
+# Put the host back on the release that last worked here: the tag, the compose
+# file that belongs to it, AND the containers. The first version of this only
+# rewrote KP_IMAGE_TAG - a line in a text file. So a `compose up` that died
+# half way left new containers running, the checkout on the new tag, and
+# nothing whatsoever bringing the old ones back: the env file claimed a
+# rollback that had not happened.
+restore() {
+    [[ -n "${CURRENT}" ]] || return 0
+    say "Restoring ${CURRENT}"
+    checkout "${CURRENT}"
+    write_tag "${CURRENT}"
+    compose up -d --remove-orphans || true
+}
+
+# Say why, put the host back, then stop. The reason is printed before the
+# restore so that a log read from the top states the cause, not the cure.
+abort() { printf 'REFUSED: %s\n' "$1" >&2; restore; exit 1; }
+
+# --- what is the newest release? --------------------------------------------
+say "Asking ${REPOSITORY} for its latest release"
+# A server with no route out, a rate limit, a repository that moved: all
+# three arrive here as a curl exit code, and `set -e` would end the run on
+# a bare number. A timer that fires every five minutes deserves a sentence.
+if ! response=$(curl -fsSL --max-time 30 \
+    -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null); then
+    fail "cannot reach the GitHub API for ${REPOSITORY} - offline, rate-limited, or no such repository"
+fi
+LATEST=$(printf '%s' "${response}" \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+
+# The tag names the images and the signing identity. Anything other than a
+# version is either an API error or something a reader would not expect to be
+# deployed, and both deserve a stop rather than a guess.
+[[ "${LATEST}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "unexpected tag from the API: '${LATEST}'"
+
+echo "    deployed: ${CURRENT:-<none>}"
+echo "    latest:   ${LATEST}"
+
+if [[ -f "${FAILED_FILE}" ]] && grep -Fxq "${LATEST}" "${FAILED_FILE}"; then
+    say "${LATEST} already failed to become healthy here; not retrying (rm ${FAILED_FILE} to force)"
+    exit 0
+fi
+
+# --- is what should run actually running? -----------------------------------
+# Matching tags say what SHOULD run, not that anything does. Treating them as
+# proof of health left this host dead for two and a half hours while the timer
+# reported "already on v0.2.3" every five minutes: the one state a deployer is
+# supposed to notice was the one it declared success on. A deployer that only
+# deploys is not enough - between releases, converging IS the job.
+if [[ "${CURRENT}" == "${LATEST}" ]]; then
     pending="$(unhealthy)"
-    [[ -z "${pending}" ]] && break
-    sleep 5
+    if [[ -z "${pending}" ]]; then
+        say "Already on ${LATEST} and healthy; nothing to do"
+        exit 0
+    fi
+    say "On ${LATEST} but not healthy: ${pending//$'\n'/ }"
+    if [[ -n "${KP_DRY_RUN:-}" ]]; then
+        say "Dry run: would reconcile ${LATEST}. Nothing changed."
+        exit 0
+    fi
+    say "Reconciling ${LATEST}"
+    compose up -d --remove-orphans || fail "compose could not bring ${LATEST} back up"
+    pending="$(wait_healthy)"
+    [[ -z "${pending}" ]] || fail "${LATEST} is still not healthy after reconciling: ${pending//$'\n'/ }"
+    say "Reconciled ${LATEST}"
+    exit 0
+fi
+
+# --- the signature decides ---------------------------------------------------
+# Verified HERE, on the machine that will run the code - not only in the
+# workflow that built it. This is where a swapped image in the registry is
+# caught, and the only place where catching it still prevents anything.
+IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@refs/tags/${LATEST}"
+say "Verifying the signature of each image for ${LATEST}"
+for image in "${IMAGES[@]}"; do
+    reference="${REGISTRY}/knowpilot-${image}:${LATEST}"
+    if cosign verify "${reference}" \
+        --certificate-identity "${IDENTITY}" \
+        --certificate-oidc-issuer "${ISSUER}" >/dev/null 2>&1; then
+        echo "    ok  ${reference}"
+    else
+        fail "${reference} is not signed by ${IDENTITY} - NOT deploying"
+    fi
 done
 
-pending="$(unhealthy)"
+if [[ -n "${KP_DRY_RUN:-}" ]]; then
+    say "Dry run: would deploy ${LATEST}. Nothing changed."
+    exit 0
+fi
+
+# --- deploy ------------------------------------------------------------------
+say "Deploying ${LATEST}"
+checkout "${LATEST}"
+write_tag "${LATEST}"
+
+# 2.5 GB over someone else's network. Seen for real: a reset after ninety
+# minutes of pulling. One lost connection is not a reason to give up on a
+# release - and the signatures were verified above, so a retry cannot fetch
+# anything else. A pull that fails is not quarantined: the network failing
+# says nothing about the release, and the next tick should try again.
+pulled=""
+for attempt in 1 2 3; do
+    if compose pull --quiet; then
+        pulled=1
+        break
+    fi
+    echo "    pull attempt ${attempt} of 3 failed" >&2
+    sleep 30
+done
+[[ -n "${pulled}" ]] || abort "could not pull the images for ${LATEST} after three attempts"
+
+# This one IS the release's own fault: a compose file that will not start is a
+# property of the version, not of the network.
+if ! compose up -d --remove-orphans; then
+    quarantine "${LATEST}"
+    abort "compose refused to start ${LATEST}"
+fi
+
+say "Waiting up to ${HEALTH_TIMEOUT}s for the containers to become healthy"
+pending="$(wait_healthy)"
+
 if [[ -z "${pending}" ]]; then
     # Only now. This file is the record that ${LATEST} actually ran here.
     mkdir -p "$(dirname "${STATE_FILE}")"
@@ -245,10 +321,14 @@ fi
 # --- roll back ---------------------------------------------------------------
 echo "    still not healthy: ${pending//$'\n'/ }" >&2
 if [[ -z "${CURRENT}" ]]; then
+    # Nothing to protect and nothing to go back to. Deliberately NOT
+    # quarantined: on a host that has never run anything, a retry can only
+    # improve matters, and refusing for ever would strand it empty.
     echo "REFUSED: no previous tag to roll back to; the stack is left as it is" >&2
     exit 1
 fi
 
+quarantine "${LATEST}"
 say "Rolling back to ${CURRENT}"
 checkout "${CURRENT}"
 write_tag "${CURRENT}"

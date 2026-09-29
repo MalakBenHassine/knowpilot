@@ -243,10 +243,49 @@ sudo systemctl start knowpilot-update.service  # now, without waiting
 ```
 
 A run that refuses says why and changes nothing. A run that deploys and then
-finds a container never became healthy writes the previous tag back and exits
-non-zero, so `systemctl status` is red and the journal holds the reason. It
-does **not** retry: a timer that reinstalls a broken release every five
-minutes is a loop, not a recovery.
+finds a container never became healthy puts the previous release back - the
+tag, the compose file that belongs to it, **and** the containers - and exits
+non-zero, so `systemctl status` is red and the journal holds the reason.
+
+It does **not** retry: a timer that reinstalls a broken release every five
+minutes is a loop, not a recovery. The tag goes to
+`/var/lib/knowpilot/failed`, and every later run skips it:
+
+```
+==> v0.2.4 already failed to become healthy here; not retrying
+```
+
+The cure for a bad release is the next release, which is not in that file.
+Image tags here are immutable, so there is nothing to wait for. Force a retry
+only when the fault was the machine and not the code - a full disk, a pull
+cut off by the network - by deleting the file:
+
+```bash
+sudo rm /var/lib/knowpilot/failed
+```
+
+Between releases the timer is not idle. A matching tag says what *should*
+run, not that anything does, so every run also looks at the containers and
+brings back the ones that have stopped:
+
+```
+==> On v0.2.3 but not healthy: api (unhealthy) worker (exited)
+==> Reconciling v0.2.3
+==> Reconciled v0.2.3
+```
+
+This is the state that used to be reported as success. Without it the host
+stayed dead for two and a half hours while the timer said `already on v0.2.3`
+every five minutes.
+
+Three records say what the host believes, and they answer different
+questions - never read one for another:
+
+| Record | Question it answers |
+| --- | --- |
+| `/var/lib/knowpilot/deployed` | which release has actually been healthy here |
+| `/var/lib/knowpilot/failed` | which releases must never be tried again |
+| `KP_IMAGE_TAG` in `.env.production` | which tag compose uses on the next `up` |
 
 ## 9. Updates, by hand
 
@@ -298,6 +337,8 @@ not a backup. Restore them once, on a scratch machine, before you need to.
 | Logs of one service | `kp logs -f api` |
 | Dashboards | the SSH tunnel of section 7 |
 | Raw metrics of the API | `kp exec api python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/metrics').read().decode())"` |
+| Why a release is being skipped | `cat /var/lib/knowpilot/failed` |
+| What has really run here | `cat /var/lib/knowpilot/deployed` |
 | Raw metrics of the worker | `kp exec worker python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:9100/metrics').read().decode())"` |
 | Keycloak administration | the scripts in `infra/keycloak/`, never the web console (not exposed) |
 | Re-index every document | `kp exec api python -m scripts.reindex` |

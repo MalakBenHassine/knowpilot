@@ -47,7 +47,17 @@ Then: write the tag, `compose pull`, `compose up -d`, and wait for every
 container that declares a healthcheck to become `healthy`. A container that is
 merely `running` is not evidence - a process can be up and refusing every
 request, which is exactly the failure this exists to catch. If the wait times
-out, the previous tag is written back and the stack is brought up again.
+out, the release is recorded as having failed on this host and the previous one
+is put back: its tag, its compose file, and its containers.
+
+**And when there is no new release, it reconciles.** Comparing tags answers
+*what should run here*; it says nothing about what is running. Treating a match
+as success is what let this host sit dead for two and a half hours while the
+timer reported `already on v0.2.3` every five minutes - the one state a
+deployer exists to notice was the state it congratulated itself on. So a run
+that finds the tag already correct still reads the health of every container,
+and brings up the ones that have stopped. Between releases, converging is the
+whole job.
 
 **Push and pull differ in who holds a secret.** Deploying from CI means
 storing a key in GitHub that opens production; a compromised workflow then
@@ -66,9 +76,24 @@ install, and `KP_DRY_RUN=1` shows what the timer would do without doing it.
   rate limit for those is sixty an hour per address.
 - **A bad release rolls itself back.** Not a fix, a floor: the previous images
   are still local, so the rollback is a container restart.
-- **A rollback is reported, not retried.** The unit has no `Restart=`: a timer
-  that reinstalls a broken release every five minutes turns one bad tag into a
-  loop and buries the log line that explained the first failure.
+- **A rollback is reported, not retried** - which this ADR claimed for the
+  wrong reason, and therefore did not get. `Restart=` governs whether *systemd*
+  starts the unit again after it exits; it has no bearing on the **timer**,
+  which fires five minutes later regardless. The script it ran had no memory of
+  the failure, so it would pull 2.5 GB, take the stack down for the whole health
+  timeout, roll back, and do it again - for ever. One bad tag would not have
+  cost a failed deployment but a permanent cycle of outages, worse than
+  deploying nothing. The no-retry property needed a record, not the absence of a
+  directive: a tag that failed here is written to `/var/lib/knowpilot/failed`
+  and skipped by every later run. Since image tags are immutable, the cure for a
+  bad release is the next release, and an operator who wants the same one
+  retried deletes the file.
+- **Three records, three questions.** `deployed` says which release has been
+  healthy here, `failed` which must never be tried again, and `KP_IMAGE_TAG`
+  which tag the next `compose up` will use. The first version of this script had
+  only the last one and read it as all three, which wedged a real host: a pull
+  cut off after ninety minutes left the tag written, and every run afterwards
+  concluded it was already deployed - with nothing running at all.
 - **The script cannot roll back the database.** A release whose migration has
   already run and is not backward compatible will not be saved by writing the
   old tag back. That is a constraint on how migrations are written - additive
