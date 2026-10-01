@@ -309,6 +309,22 @@ a new column is nullable, a removal waits for the release after the one that
 stopped using it. A release that cannot be rolled back by restarting the
 previous images is a release the automation cannot save.
 
+**Nor can it roll back the format of `.env.production`.** That file is
+git-ignored, so `git checkout <older tag>` moves the code without moving it.
+If the older release wrote or read that file differently, it will meet a file
+it does not understand - which is what happened on the way to proving the
+rollback works: v0.2.3's deployer does not strip quotes from values, the
+current Ansible wrote them, and every image was refused as unsigned. The way
+out is to put the checkout back on a release that can read the file:
+
+```bash
+sudo systemctl stop knowpilot-update.timer
+sudo git -C /opt/knowpilot fetch --tags origin
+sudo git -C /opt/knowpilot checkout --force <a tag that can read it>
+sudo KP_HEALTH_TIMEOUT=1800 knowpilot-update
+sudo systemctl start knowpilot-update.timer
+```
+
 Start the timer again when you are done:
 
 ```bash

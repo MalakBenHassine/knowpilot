@@ -87,6 +87,13 @@ read_env() {
 
 REGISTRY="$(read_env KP_IMAGE_REGISTRY)"
 [[ -n "${REGISTRY}" ]] || fail "KP_IMAGE_REGISTRY is not set in ${ENV_FILE}"
+# A registry path holds no spaces and no quotes. Without this line, a value
+# this reader could not parse surfaced four steps later as "is not signed by",
+# and a signature failure is the very last thing anyone should be debugging
+# when the real fault is one pair of quotes. Seen for real: a rollback to a
+# release whose read_env did not strip them refused all three images.
+[[ "${REGISTRY}" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]] \
+    || fail "KP_IMAGE_REGISTRY is not a registry path: '${REGISTRY}' - a quoted or spaced value in ${ENV_FILE}?"
 
 # KP_IMAGE_TAG in the env file is what compose SHOULD run - it has to be
 # written before `compose pull`, because compose reads it to know what to pull.

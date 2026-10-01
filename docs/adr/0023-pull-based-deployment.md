@@ -94,6 +94,30 @@ install, and `KP_DRY_RUN=1` shows what the timer would do without doing it.
   only the last one and read it as all three, which wedged a real host: a pull
   cut off after ninety minutes left the tag written, and every run afterwards
   concluded it was already deployed - with nothing running at all.
+- **A rollback restores code, not state - and `.env.production` is state.**
+  It is git-ignored, so it does not move when the checkout does. A release that
+  changes how that file is *written* therefore cannot be rolled back past,
+  because the older code meets a file it cannot parse. Demonstrated rather than
+  imagined: rolling back to v0.2.3 handed its `read_env`, which does not strip
+  quotes, a file written by a later Ansible run that adds them. The deployer
+  refused all three images as unsigned, naming
+  `"ghcr.io/malakbenhassine"` with the quotes inside the value, and the host
+  went on serving v0.2.3 unable to deploy anything again without a hand on it.
+  The rule that follows is the one migrations already obey: change the format
+  of shared state only when there is no alternative, and only in a way older
+  readers survive. Hence only `KP_TLS` is quoted now - it is the only value
+  that can contain a space - and the deployer checks that the registry it read
+  looks like a registry, so the next mismatch says so instead of blaming a
+  signature.
+- **The deployer rolls back itself, too.** The script that runs after a
+  rollback is the rolled-back script, so every protection newer than the target
+  release is missing at exactly the moment it was written for. On this host the
+  run straight after the rollback went to signature verification without a word
+  about quarantine, because v0.2.3's deployer has no quarantine to consult -
+  the record was written by v0.2.5 and read by nobody. From v0.2.5 onwards both
+  sides of a rollback know about it, which is the only thing that makes the
+  property hold: a safeguard in a deployer is only as reliable as the oldest
+  release it can land on.
 - **The script cannot roll back the database.** A release whose migration has
   already run and is not backward compatible will not be saved by writing the
   old tag back. That is a constraint on how migrations are written - additive

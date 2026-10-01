@@ -54,11 +54,20 @@
   ansible.builtin.lineinfile:
     path: "{{ knowpilot_directory }}/.env.production"
     regexp: "^#? *{{ item.key }}="
-    # Quoted, because these scripts `source` this file and a value with a
-    # space breaks that: KP_TLS=tls internal made bash read KP_TLS=tls as an
-    # environment prefix and try to run `internal` as a command. Compose
-    # strips the quotes, verified on this version.
-    line: '{{ item.key }}="{{ item.value }}"'
+    # Quoted ONLY when the value contains a space, and KP_TLS is the only one
+    # that ever does: KP_TLS=tls internal made bash read KP_TLS=tls as an
+    # environment prefix and try to run `internal` as a command.
+    #
+    # Quoting all four was the first fix, and it made this file unreadable by
+    # any release older than the one that taught the deployer to strip quotes.
+    # That is not hypothetical. A rollback to v0.2.3 gave its read_env - which
+    # does not strip them - a file written here, and the deployer refused every
+    # image as unsigned, naming `"ghcr.io/malakbenhassine"` with the quotes
+    # inside the value. This file is git-ignored, so it does NOT roll back with
+    # the code that reads it: keeping it readable by older readers is the only
+    # thing that keeps a rollback possible. Compose strips quotes either way,
+    # verified on this version.
+    line: "{{ item.key }}={{ '\"' ~ item.value ~ '\"' if ' ' in item.value else item.value }}"
     mode: "0600"
   loop:
     - {key: KP_IMAGE_REGISTRY, value: "{{ knowpilot_registry }}"}
