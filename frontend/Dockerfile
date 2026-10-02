@@ -77,8 +77,21 @@ FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime
 # curl, expat, libcrypto and util-linux. Upgrading here brings them to
 # what Alpine publishes on the day the image is built, and the release
 # workflow scans the result, so the gate proves it worked.
+#
+# APK_SNAPSHOT is what makes that last sentence true, and it is load-bearing.
+# `RUN apk upgrade` has no input that ever changes, so BuildKit reused the
+# layer from the release workflow's GitHub Actions cache: the upgrade ran on
+# the day this line was last edited, not on the day the image was built. The
+# command was right and the build was stale, which is the worst shape a
+# security control can take - it looks correct indefinitely.
+#
+# Found by CVE-2026-103111: Alpine had published pcre2 10.49-r0, `apk upgrade`
+# was sitting right here, and the image still shipped 10.48-r0. The release
+# workflow passes the tag, so every release upgrades against the index of its
+# own build day, while rebuilding one release still reproduces it.
+ARG APK_SNAPSHOT=unset
 USER root
-RUN apk upgrade --no-cache
+RUN echo "apk upgrade for ${APK_SNAPSHOT}" && apk upgrade --no-cache
 USER nginx
 
 LABEL org.opencontainers.image.title="knowpilot-frontend" \

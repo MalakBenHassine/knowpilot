@@ -80,7 +80,15 @@ jobs:
         with:
           context: ${{ matrix.context }}
           platforms: ${{ matrix.platform }}
-          build-args: ${{ matrix.image == 'frontend' && 'VITE_API_MODE=http' || '' }}
+          # One per line; an empty line is ignored, so each argument is
+          # passed only to the image that declares it and no build is
+          # warned about an argument it never asked for.
+          #
+          # APK_SNAPSHOT exists to defeat the cache below for one layer:
+          # see frontend/Dockerfile for what a cached `apk upgrade` cost.
+          build-args: |
+            ${{ matrix.image == 'frontend' && 'VITE_API_MODE=http' || '' }}
+            ${{ matrix.image == 'frontend' && format('APK_SNAPSHOT={0}', github.ref_name) || '' }}
           outputs: type=image,name=${{ steps.name.outputs.repository }},push-by-digest=true,name-canonical=true,push=true
           # Per-image, per-architecture cache in GitHub's cache service: an
           # unchanged dependency layer is reused instead of reinstalled.
