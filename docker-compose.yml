@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.7.5
+    image: quay.io/keycloak/keycloak:26.8.0
     # start-dev is for LOCAL ONLY: it disables HTTPS requirements and hostname
     # checks. Production uses `start --optimized` behind the reverse proxy.
     command: ["start-dev", "--health-enabled=true"]
