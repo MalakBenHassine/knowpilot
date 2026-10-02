@@ -235,11 +235,16 @@ services:
         - -c
         - "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['KP_REDIS_URL']).exists('knowpilot:worker-health') else 1)"
       interval: 30s
-      timeout: 15s
+      # Same reason as the API's healthcheck in backend/Dockerfile: this probe
+      # starts an interpreter and imports redis before it reads one key, and
+      # both probes run on the same CPUs at the same moment. Fifteen seconds
+      # was a budget for the key read, not for the probe that performs it.
+      timeout: 30s
       retries: 3
-      # 134 s measured to load the weights, while the API loaded its own copy
-      # on the same CPUs. Below that, a normal start looks like a failure.
-      start_period: 300s
+      # 431 s measured for a cold start on this hardware, the worker loading
+      # its own copy of the weights beside the API. At 300 s, real failures
+      # began counting while a normal start was still in progress.
+      start_period: 900s
     depends_on:
       model:
         condition: service_completed_successfully

@@ -134,8 +134,20 @@ EXPOSE 8000
 # host where the worker loaded its own copy at the same time. At 120 s the API
 # was marked unhealthy while it was merely still starting, and the deployer
 # rolled back a release that was fine.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
-    CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=4).status == 200 else 1)"
+# Thirty seconds, not five. Docker has no native HTTP probe: the check runs
+# INSIDE the container, so every probe starts a Python interpreter and
+# imports urllib before it can ask anything. Five seconds was a budget for
+# the request, not for the probe, and on a VM sharing its CPUs with a worker
+# loading 2.2 GB it ran out. Three of those in a row marked a container that
+# was serving every request `unhealthy` in ninety seconds - which the
+# deployer then spent forty-one minutes trying to cure, hourly, for three
+# hours. The probe is as cheap as this image allows; the budget was wrong.
+#
+# start-period 900s because a cold start was MEASURED at 431 s here, past
+# the 300 s this used to allow - so real failures began counting while the
+# API was still legitimately loading.
+HEALTHCHECK --interval=30s --timeout=30s --start-period=900s --retries=3 \
+    CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=25).status == 200 else 1)"
 
 # Exec form, never the shell form. `CMD uvicorn ...` would run under /bin/sh,
 # which does not forward signals: `docker stop` would time out and kill the

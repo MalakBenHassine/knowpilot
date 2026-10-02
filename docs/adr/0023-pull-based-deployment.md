@@ -109,6 +109,28 @@ install, and `KP_DRY_RUN=1` shows what the timer would do without doing it.
   that can contain a space - and the deployer checks that the registry it read
   looks like a registry, so the next mismatch says so instead of blaming a
   signature.
+- **Converging means acting only on what the action can change.** The first
+  reconcile shipped without that distinction and cost three hours on a live
+  host. `compose up -d` starts a container that is missing or stopped; it does
+  nothing whatsoever to one already running with the configuration it has. A
+  red healthcheck on a running container is therefore not reconcilable - and
+  restarting it would be worse, trading a seven-minute model load for a
+  measurement error. So the branch now separates *stopped* from
+  *running-and-red*: it brings back the first, and refuses in seconds on the
+  second rather than waiting out a thirty-minute deployment budget it has no
+  use for, failing, and starting again at the next tick. Each of those cycles
+  held the lock for forty-one minutes, which is to say that for three hours no
+  real release could have deployed - the deployer was fully occupied chasing a
+  container that was answering every request.
+- **The branch now has a test, because that is what was missing.**
+  `infra/server/test-update.sh` runs update.sh against real containers whose
+  health is a file on the host, so health can be flipped WITHOUT stopping
+  anything - the only way to reproduce running-and-red. Six cases: nothing to
+  do, reconcile a stopped container, refuse fast on a red probe, skip a
+  quarantined release, quarantine and roll back, and refuse again on the tick
+  after. Run against the version that shipped the bug it fails three
+  assertions in case 3 and passes the other sixteen, which is the only
+  evidence that a test is worth keeping.
 - **The deployer rolls back itself, too.** The script that runs after a
   rollback is the rolled-back script, so every protection newer than the target
   release is missing at exactly the moment it was written for. On this host the

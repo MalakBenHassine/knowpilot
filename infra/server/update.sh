@@ -45,13 +45,22 @@ IMAGES=(backend frontend keycloak)
 # not a slow deployment - it is a rollback of a release that was fine.
 HEALTH_TIMEOUT="${KP_HEALTH_TIMEOUT:-1800}"
 
+# A probe that blinked is not an incident. When every container is running
+# and only a healthcheck is red, this is how long to look again before
+# saying so - seconds, not the thirty minutes a deployment with a model
+# load deserves and a red probe has no use for.
+RECONCILE_GRACE="${KP_RECONCILE_GRACE:-60}"
+
 say() { printf '==> %s\n' "$1"; }
 fail() { printf 'REFUSED: %s\n' "$1" >&2; exit 1; }
 
 # --- one at a time ----------------------------------------------------------
 # A timer that fires while the previous run is still pulling 2.5 GB would
 # deploy two versions at once. flock re-executes this script holding the lock.
-LOCK="/tmp/knowpilot-update.lock"
+# Overridable so that infra/server/test-update.sh can hold its own lock:
+# a test run on the VM must not be able to block the real deployer, nor be
+# blocked by it.
+LOCK="${KP_LOCK_FILE:-/tmp/knowpilot-update.lock}"
 if [[ "${KP_LOCKED:-}" != "1" ]]; then
     export KP_LOCKED=1
     # NOT `exec flock ... || ...`: exec REPLACES this shell, so when flock
@@ -179,14 +188,32 @@ unhealthy() {
 # when the deadline passes. The caller decides what that means, because it
 # means different things during a deployment and during a reconcile.
 wait_healthy() {
+    local budget="${1:-${HEALTH_TIMEOUT}}"
     local deadline pending
-    deadline=$(( SECONDS + HEALTH_TIMEOUT ))
+    deadline=$(( SECONDS + budget ))
     while (( SECONDS < deadline )); do
         pending="$(unhealthy)"
         [[ -z "${pending}" ]] && return 0
         sleep 5
     done
     unhealthy
+}
+
+# What `compose up -d` can actually start: a container that is missing, or
+# stopped, or sat down in `created`. Deliberately NOT one that is running
+# with a red healthcheck - the reconcile branch says what that cost.
+stopped() {
+    local rows
+    rows="$(compose ps -a --format '{{.Service}}|{{.Health}}|{{.State}}|{{.ExitCode}}' 2>/dev/null)"
+    if [[ -z "${rows}" ]]; then
+        echo "nothing is running"
+        return 0
+    fi
+    awk -F'|' '
+        $3 == "running" { next }
+        $3 == "exited"  { if ($4 != "0") print $1 " (exit " $4 ")"; next }
+        { print $1 " (" $3 ")" }
+    ' <<< "${rows}"
 }
 
 quarantine() {
@@ -252,11 +279,44 @@ if [[ "${CURRENT}" == "${LATEST}" ]]; then
         exit 0
     fi
     say "On ${LATEST} but not healthy: ${pending//$'\n'/ }"
+
+    # Two states arrive in ${pending} looking alike, and `compose up -d` treats
+    # them nothing alike. It starts what is missing or stopped - the outage this
+    # branch was written for. It does NOTHING to a container already running
+    # with the configuration it has, so it cannot cure a red probe.
+    #
+    # The first version of this branch did not separate them. It ran
+    # `compose up -d`, waited out the whole 1800 s deployment budget, failed,
+    # and let the next tick begin again: forty-one minutes of held lock per
+    # cycle, during which no real release could have deployed. Observed here
+    # for three hours, while the container it was chasing served every request
+    # - its probe had simply run out of a five-second budget three times in a
+    # row (backend/Dockerfile).
+    #
+    # Restarting instead would be worse: a seven-minute model load, a genuine
+    # outage, to cure a measurement.
+    down="$(stopped)"
+
     if [[ -n "${KP_DRY_RUN:-}" ]]; then
-        say "Dry run: would reconcile ${LATEST}. Nothing changed."
+        if [[ -z "${down}" ]]; then
+            say "Dry run: everything is running, so only a probe is red. Nothing changed."
+        else
+            say "Dry run: would reconcile ${down//$'\n'/ }. Nothing changed."
+        fi
         exit 0
     fi
-    say "Reconciling ${LATEST}"
+
+    if [[ -z "${down}" ]]; then
+        say "Everything is running; looking again for ${RECONCILE_GRACE}s"
+        pending="$(wait_healthy "${RECONCILE_GRACE}")"
+        if [[ -z "${pending}" ]]; then
+            say "The probe recovered on its own; ${LATEST} is healthy"
+            exit 0
+        fi
+        fail "${LATEST} is running but not healthy: ${pending//$'\n'/ } - nothing this script does can cure a red probe on a running container, so it needs a person"
+    fi
+
+    say "Reconciling ${LATEST}: ${down//$'\n'/ }"
     compose up -d --remove-orphans || fail "compose could not bring ${LATEST} back up"
     pending="$(wait_healthy)"
     [[ -z "${pending}" ]] || fail "${LATEST} is still not healthy after reconciling: ${pending//$'\n'/ }"

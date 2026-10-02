@@ -120,7 +120,9 @@ spec:
             exec:
               command: ["python", "-c", "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['KP_REDIS_URL']).exists('knowpilot:worker-health') else 1)"]
             periodSeconds: 15
-            timeoutSeconds: 15
+            # The exec starts an interpreter and imports redis before it
+            # reads one key; fifteen seconds was a budget for the read.
+            timeoutSeconds: 30
             # 2.2 GB of weights load first: measured at 134 s where another
             # process loaded its own copy on the same CPUs.
             failureThreshold: 30
@@ -128,7 +130,9 @@ spec:
             exec:
               command: ["python", "-c", "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['KP_REDIS_URL']).exists('knowpilot:worker-health') else 1)"]
             periodSeconds: 60
-            timeoutSeconds: 15
+            # The exec starts an interpreter and imports redis before it
+            # reads one key; fifteen seconds was a budget for the read.
+            timeoutSeconds: 30
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
