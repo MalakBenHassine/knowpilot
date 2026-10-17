@@ -28,6 +28,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # The same grouping as the two ecosystems above, and here it is not only
+      # a matter of tidiness. github/codeql-action/init and .../analyze are two
+      # entry points of ONE action, and CodeQL refuses a run whose halves
+      # disagree - "Error when processing the SARIF file". Ungrouped, Dependabot
+      # opened them as two pull requests, and each one on its own produced a
+      # mismatched pair that failed its own checks. Neither pull request was
+      # wrong; their separation was.
+      minor-and-patch:
+        update-types: [minor, patch]
 
   - package-ecosystem: docker-compose
     directory: /
