@@ -33,6 +33,34 @@ for ARM and x86 alike.
 - Docker Engine with the Compose plugin, from Docker's own repository
   (docs.docker.com/engine/install/ubuntu). Add your user to the `docker`
   group, then log out and back in.
+- **Check that something owns the wired interface.** The playbook does this
+  (`infra/ansible/roles/base`), and on a cloud instance it is usually already
+  true, but it is worth knowing why the task exists. Ubuntu's NetworkManager
+  is configured to manage wifi and modems only, so on an image whose netplan
+  names NetworkManager as its renderer and declares no interface, the wired
+  NIC belongs to nobody:
+
+  ```bash
+  nmcli device status | grep -E "DEVICE|^en"
+  ```
+
+  `unmanaged` there means the machine has a network because something ran
+  `dhclient` once, not because anything will renew it. On the VM used for this
+  project that cost fifteen days: the host suspended, the lease died, and
+  nothing brought it back. The deployer refused every six minutes with
+  `cannot reach the GitHub API` - correctly, and misleadingly, because the
+  fault was two layers below it.
+
+  The playbook hands the interface to `systemd-networkd`, which is Ubuntu
+  Server's own renderer and has no notion of an unmanaged ethernet. What to
+  look for afterwards:
+
+  ```bash
+  networkctl status --no-pager | grep -E "ens|State"
+  ```
+
+  `routable (configured)` is the word that matters. It means the interface
+  comes back on its own after a reboot or a resume.
 
 ## 2. A name
 

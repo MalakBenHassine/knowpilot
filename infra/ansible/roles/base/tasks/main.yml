@@ -131,3 +131,90 @@
   register: base_hardening
   changed_when: "'already in /etc/ufw/after.rules' not in base_hardening.stdout"
   failed_when: base_hardening.rc != 0
+
+# --- the wired interface has to belong to somebody --------------------------
+# NetworkManager on Ubuntu ships configured to manage wifi and modems and
+# nothing else: /usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf
+# reads `unmanaged-devices=*,except:type:wifi,except:type:gsm,except:type:cdma`.
+# This image's netplan named NetworkManager as its renderer and then declared
+# no interface at all, so the wired NIC belonged to nobody and `nmcli` called
+# it `strictly unmanaged`.
+#
+# It worked anyway, because something had run dhclient once. Then the host
+# suspended, the lease died with it, and no one renewed it: the machine had no
+# route for fifteen days. The deployer refused correctly every six minutes the
+# whole time, which is how a network fault came to look like a deployment
+# fault - and why this belongs in the playbook rather than in a shell history.
+#
+# systemd-networkd is Ubuntu Server's own renderer and has no notion of an
+# unmanaged ethernet. Matching `en*` instead of naming ens33 survives a NIC
+# rename; `optional: true` keeps a boot from hanging for two minutes when the
+# hypervisor has the adapter disconnected.
+- name: Give the wired interface to systemd-networkd
+  ansible.builtin.copy:
+    dest: /etc/netplan/60-knowpilot-ethernets.yaml
+    # 0600 because netplan prints a warning on every single run otherwise, and
+    # a network configuration the whole machine can read is a finding waiting
+    # to be written up.
+    mode: "0600"
+    content: |
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          all-ethernets:
+            match:
+              name: "en*"
+            dhcp4: true
+            optional: true
+  register: base_netplan
+
+- name: Stop netplan naming a renderer that will not manage ethernet
+  # Renamed rather than deleted: netplan reads *.yaml and nothing else, so the
+  # file goes inert while staying readable by whoever wonders what used to be
+  # here. `removes` makes this a no-op once it has run.
+  ansible.builtin.command:
+    cmd: >-
+      mv /etc/netplan/01-network-manager-all.yaml
+         /etc/netplan/01-network-manager-all.yaml.disabled
+    removes: /etc/netplan/01-network-manager-all.yaml
+  register: base_netplan_old
+
+- name: Make sure systemd-networkd is the service that runs
+  ansible.builtin.systemd_service:
+    name: systemd-networkd
+    enabled: true
+    state: started
+  register: base_networkd
+
+- name: Note whether anything about the network moved
+  ansible.builtin.set_fact:
+    base_network_changed: "{{ (base_netplan is changed)
+      or (base_netplan_old is changed)
+      or (base_networkd is changed) }}"
+
+- name: Apply the network configuration
+  # Fire and forget. Changing the renderer reconfigures the very link Ansible
+  # is talking over, so waiting for an answer would mean waiting on a
+  # connection that is being rebuilt. The next task waits for the host to come
+  # back, which is the honest way to say "this may cut me off for a moment".
+  ansible.builtin.command: netplan apply
+  async: 60
+  poll: 0
+  changed_when: true
+  when: base_network_changed | bool
+
+- name: Wait for the host to answer again
+  ansible.builtin.wait_for_connection:
+    delay: 5
+    timeout: 180
+  when: base_network_changed | bool
+
+- name: Prove the host has a route off this machine
+  # The property that matters is not "a unit is enabled" but "there is a way
+  # out". Fifteen days of refusals came from its absence.
+  ansible.builtin.command: ip route show default
+  register: base_route
+  changed_when: false
+  check_mode: false
+  failed_when: base_route.stdout | trim == '' and not ansible_check_mode
