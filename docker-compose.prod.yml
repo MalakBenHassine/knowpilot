@@ -91,7 +91,7 @@ services:
 
   caddy:
     <<: *hardened
-    image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
     # The only published ports of the whole stack. 443/udp is HTTP/3.
     ports:
       - "80:80"
@@ -130,7 +130,7 @@ services:
   # its own.
   ca-export:
     <<: *hardened
-    image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
