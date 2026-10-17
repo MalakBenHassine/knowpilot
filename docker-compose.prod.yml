@@ -429,7 +429,7 @@ services:
 
   grafana:
     <<: *hardened
-    image: grafana/grafana:13.0.9@sha256:c26daa778ea9fd817be3fe606ba4b78ea4c217a7a27c1ba8f5faa4418ecc48dd
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     environment:
       GF_SECURITY_ADMIN_USER: ${KP_GRAFANA_ADMIN:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${KP_GRAFANA_ADMIN_PASSWORD:?KP_GRAFANA_ADMIN_PASSWORD is required}
