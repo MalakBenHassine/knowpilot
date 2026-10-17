@@ -367,10 +367,25 @@ for attempt in 1 2 3; do
 done
 [[ -n "${pulled}" ]] || abort "could not pull the images for ${LATEST} after three attempts"
 
-# This one IS the release's own fault: a compose file that will not start is a
-# property of the version, not of the network.
+# NOT quarantined, and the comment that used to stand here said the opposite:
+# "a compose file that will not start is a property of the version, not of the
+# network". A live host disproved it. `compose up` failed with
+#
+#     cannot stop container 49e67c14430d: tried to kill container, but did not
+#     receive an exit event
+#
+# which is a daemon that had lost track of a container after the machine
+# suspended. The release was fine. It was quarantined anyway, and this host sat
+# on the previous version for fifteen days until a person deleted the file.
+#
+# The two costs are not symmetric, and that is what decides it. When
+# `compose up` fails, nothing new is running: restore puts the previous release
+# back, and the next tick costs seconds because the images are already pulled.
+# A HEALTH failure is a different claim - a release did run, and did not work -
+# and retrying THAT one costs 2.5 GB and an outage every six minutes. Only the
+# second is worth remembering; remembering the first strands a host on an
+# environment's bad day.
 if ! compose up -d --remove-orphans; then
-    quarantine "${LATEST}"
     abort "compose refused to start ${LATEST}"
 fi
 

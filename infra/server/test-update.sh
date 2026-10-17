@@ -79,7 +79,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-command -v docker >/dev/null || { echo "docker is required"; exit 1; }
+# `command -v docker` is not the question; whether it answers is. Docker
+# Desktop drops its WSL integration across a restart, and the binary then
+# disappears from the distro entirely - which produced twelve failing
+# assertions below, every one of them meaning "docker returned an error" and
+# none of them meaning anything about update.sh.
+if ! docker version >/dev/null 2>&1; then
+    echo "docker is not answering, so nothing below would mean anything."
+    echo "In WSL this is usually Docker Desktop's integration being off for"
+    echo "this distro: Settings -> Resources -> WSL Integration."
+    docker version 2>&1 | sed 's/^/    /' | head -4
+    exit 1
+fi
 
 LATEST="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
     "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null \
@@ -132,8 +143,21 @@ export KP_HEALTH_TIMEOUT=20
 export KP_RECONCILE_GRACE=5
 
 echo "newest release: ${LATEST}"
-compose up -d >/dev/null 2>&1
+
+# The cases below all assume a running container. Without this check, a
+# sandbox that failed to start makes each of them fail for a reason that has
+# nothing to do with the script under test.
+if ! compose up -d > "${SANDBOX}/up.log" 2>&1; then
+    echo "the sandbox would not start:"
+    sed 's/^/    /' "${SANDBOX}/up.log"
+    exit 1
+fi
 healthy
+if [[ "$(compose ps --format '{{.Health}}' 2>/dev/null)" != "healthy" ]]; then
+    echo "the sandbox container never became healthy, so every case would lie:"
+    compose ps -a | sed 's/^/    /'
+    exit 1
+fi
 
 # --- 1 ----------------------------------------------------------------------
 case_ "1. on the newest release, and healthy: do nothing"
@@ -195,6 +219,38 @@ case_ "6. the tick after a rollback: still refuse the quarantined release"
 deployer
 expect_rc 0
 expect_says "not retrying"
+
+# --- 7 ------------------------------------------- the second regression ----
+case_ "7. compose cannot start it: say so, but do not remember it"
+cat > "${SANDBOX}/docker-compose.broken.yml" <<'YAML'
+name: knowpilot-update-test-broken
+services:
+  gate:
+    image: busybox:1.36
+    command: ["sh", "-c", "exit 1"]
+  probe:
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep 3600"]
+    depends_on:
+      gate:
+        condition: service_completed_successfully
+YAML
+rm -f "${KP_FAILED_FILE}"
+printf '%s\n' "${OLDER}" > "${KP_STATE_FILE}"
+SAVED_COMPOSE="${KP_COMPOSE_FILE}"
+export KP_COMPOSE_FILE="${SANDBOX}/docker-compose.broken.yml"
+deployer
+export KP_COMPOSE_FILE="${SAVED_COMPOSE}"
+expect_rc 1
+expect_says "compose refused to start"
+# The point of the case: a host that cannot start a release today may well
+# start it in six minutes, and the images are already pulled.
+if [[ -f "${KP_FAILED_FILE}" ]]; then
+    ko "quarantined a release that compose merely could not start"
+else
+    ok "nothing was quarantined"
+fi
+docker compose -f "${SANDBOX}/docker-compose.broken.yml" down --remove-orphans >/dev/null 2>&1 || true
 
 printf '\n%s passed, %s failed\n' "${passed}" "${failed}"
 (( failed == 0 ))

@@ -122,6 +122,17 @@ install, and `KP_DRY_RUN=1` shows what the timer would do without doing it.
   held the lock for forty-one minutes, which is to say that for three hours no
   real release could have deployed - the deployer was fully occupied chasing a
   container that was answering every request.
+- **Only a health failure is remembered.** The first quarantine also fired
+  when `compose up` returned non-zero, on the reasoning that a release which
+  will not start is a bad release. A suspended host disproved it: Docker could
+  not stop a container it had lost track of, `compose up` failed, a perfectly
+  good release was recorded as failed, and the machine stayed on the previous
+  one for fifteen days. The costs decide the rule. A failure to start leaves
+  nothing new running and costs seconds to retry, because the images are
+  already pulled; a failure to become healthy means a release ran and did not
+  work, and retrying that costs 2.5 GB and an outage every six minutes.
+  Remembering the second is protection. Remembering the first strands a host on
+  an environment's bad day.
 - **The branch now has a test, because that is what was missing.**
   `infra/server/test-update.sh` runs update.sh against real containers whose
   health is a file on the host, so health can be flipped WITHOUT stopping
