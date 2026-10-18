@@ -19,7 +19,7 @@
 # next month is not reproducible, and "it worked yesterday" is not a diagnosis.
 # `slim` carries a real Debian userland without the 300 MB of tooling of the
 # full image; `alpine` would mean musl, and PyTorch ships no musl wheels.
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 # uv as a binary copied from its own published image, rather than installed
 # with pip. It is one static file, the version is pinned, and no Python
@@ -65,7 +65,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # caches, the build tooling - is left behind unless it is copied explicitly.
 # That is the whole point of a multi-stage build: the tools that build an
 # artefact have no business running in production.
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 # Machine-readable provenance. A scanner, a registry and a colleague can all
 # answer "where does this image come from" without asking anybody.
