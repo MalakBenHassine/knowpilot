@@ -10,9 +10,45 @@
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=MalakBenHassine_knowpilot&metric=coverage)](https://sonarcloud.io/summary/new_code?id=MalakBenHassine_knowpilot)
 [![Release](https://img.shields.io/github/v/release/MalakBenHassine/knowpilot)](https://github.com/MalakBenHassine/knowpilot/releases)
 
-**Status:** feature-complete v1. Published as signed multi-architecture images
-([v0.2.0](https://github.com/MalakBenHassine/knowpilot/releases)), deployable to a
-single VM ([docs/deploy.md](docs/deploy.md)).
+**Status:** [v0.3.0](https://github.com/MalakBenHassine/knowpilot/releases),
+deployed. Multi-architecture images, signed without a private key anywhere, and
+pulled by the target machine itself rather than pushed to it
+([ADR-0023](docs/adr/0023-pull-based-deployment.md), [docs/deploy.md](docs/deploy.md)).
+
+## What this repository records
+
+A RAG assistant that answers questions is the easy half. The harder half is what
+happens to one over time, and that is what is written down here.
+
+**The release gate has said no.** Three releases were refused by the image scan
+for real, fixable vulnerabilities: v0.2.4 and v0.2.6 for jackson-databind inside
+the Keycloak distribution, v0.2.8 for pcre2 in the frontend image. None was
+silenced. Each was fixed upstream and the fix adopted, so
+[`.trivyignore.yaml`](.trivyignore.yaml) now holds **zero accepted
+vulnerabilities** - and still lists every entry it ever carried, with the
+version that removed it.
+
+**The rollback has run** - the deployment, not the code path. A release that did
+not become healthy was recorded as failed and the previous one was put back: its
+tag, its compose file and its containers
+([`infra/server/update.sh`](infra/server/update.sh)).
+
+**Refusing is a feature, and it was exercised.** The deployer spent fifteen days
+declining to deploy because the host had no route to the internet, saying so once
+every six minutes, while the service it had already deployed kept answering. The
+fault was an unowned network interface; the playbook
+[owns it now](infra/ansible/roles/base/tasks/main.yml).
+
+**Two of its own defects were found in production, and both are now tests.** A
+reconcile that could not tell a stopped container from a red healthcheck held the
+deployment lock for forty-one minutes a cycle. A quarantine that fired when
+`compose up` failed stranded a perfectly good release for two weeks.
+[`test-update.sh`](infra/server/test-update.sh) covers both: 22 assertions, and
+it fails against the versions that shipped the bugs.
+
+**Twenty-three decisions are written down.** [`docs/adr/`](docs/adr/) says what
+was chosen, what was rejected and why - and, where it matters, what turned out to
+be wrong. ADR-0023 corrects two of its own stated consequences.
 
 ## Features
 
@@ -252,8 +288,8 @@ of being forgotten.
 Anyone can check a published image, with **cosign 3 or newer**:
 
 ```bash
-cosign verify ghcr.io/malakbenhassine/knowpilot-backend:v0.2.0 \
-  --certificate-identity https://github.com/MalakBenHassine/knowpilot/.github/workflows/release.yml@refs/tags/v0.2.0 \
+cosign verify ghcr.io/malakbenhassine/knowpilot-backend:v0.3.0 \
+  --certificate-identity https://github.com/MalakBenHassine/knowpilot/.github/workflows/release.yml@refs/tags/v0.3.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
