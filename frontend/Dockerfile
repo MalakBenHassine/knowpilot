@@ -70,7 +70,7 @@ RUN npm run build
 # The unprivileged variant of the official image: it runs as uid 101 and
 # listens on 8080 out of the box. The standard nginx image starts its master
 # process as root, which a static file server has no need to be.
-FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 
 # The base image is rebuilt on its own schedule, so its Alpine packages
 # trail the patched ones - 37 HIGH vulnerabilities at the last count, in
