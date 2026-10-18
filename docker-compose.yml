@@ -59,6 +59,10 @@ services:
     restart: unless-stopped
 
   keycloak:
+    # Same version as the ARG in infra/keycloak/Dockerfile, which production is
+    # built FROM. Two Dependabot ecosystems bump these two lines separately, so
+    # a pull request that moves one has to be matched by one that moves the
+    # other - see the comment there.
     image: quay.io/keycloak/keycloak:26.8.1
     # start-dev is for LOCAL ONLY: it disables HTTPS requirements and hostname
     # checks. Production uses `start --optimized` behind the reverse proxy.

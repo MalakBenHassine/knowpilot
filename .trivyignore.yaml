@@ -9,17 +9,19 @@
 # Nothing in here may be a vulnerability in our own code or our own
 # dependencies. Those are fixed, never ignored.
 
-vulnerabilities:
-  - id: CVE-2025-59250
-    statement: >-
-      Microsoft's JDBC driver, shipped inside the Keycloak distribution.
-      KnowPilot runs Keycloak on PostgreSQL only (ADR-0020), and the image is
-      built with `kc.sh build --db=postgres`, so this driver is never loaded.
-      The only entry left, and this one has a known end rather than a hope:
-      26.8.0 was scanned with this same policy and reports nothing HIGH or
-      CRITICAL with a fix available, this driver included. That upgrade is
-      deliberately not folded in here. 26.7.5 is a patch release and carries
-      no breaking change by definition, while mixing a minor upgrade of the
-      identity provider into a security fix would mean any login regression
-      had two candidate causes.
-    expired_at: 2026-12-31
+# Empty, and that is the whole point. Every entry this file ever carried was
+# removed because the vulnerability was FIXED upstream and the fix adopted,
+# never because it became inconvenient or because a date passed:
+#
+#   CVE-2025-59250   mssql-jdbc 13.2.1 -> 13.4.0    Keycloak 26.8.1
+#   CVE-2026-8763    Bouncy Castle 1.84 -> 1.86     Keycloak 26.7.5
+#   CVE-2026-13506   Bouncy Castle 1.84 -> 1.86     Keycloak 26.7.5
+#   CVE-2026-68497   jackson-databind -> 2.21.7     Keycloak 26.7.5
+#   CVE-2026-75595   Netty 4.1.136 -> 4.1.138       Keycloak 26.7.5
+#   CVE-2026-84939   FreeMarker 2.3.32 -> 2.3.35    Keycloak 26.7.5
+#
+# Measured on the image this repository BUILDS, not on the one it starts from:
+# `kc.sh build` keeps the drivers Keycloak ships, so the upstream scan is not
+# the answer. The built image reports nothing HIGH or CRITICAL with a fix
+# available, with this file empty.
+vulnerabilities: []

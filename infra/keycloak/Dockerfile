@@ -14,7 +14,14 @@
 
 # Same version as docker-compose.yml, pinned by digest (multi-architecture
 # index, so the image builds on x86 and ARM alike).
-ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.7.5@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85
+#
+# TWO files pin Keycloak, and two different Dependabot ecosystems bump them:
+# `docker-compose` reads docker-compose.yml, `docker` reads this file. They
+# arrive as separate pull requests, so merging one without the other leaves the
+# development stack and the production image on different versions - with the
+# first line of this comment lying about it. Not hypothetical: #30 moved the
+# compose file to 26.8.1 and left this line at 26.7.5. Move both, or neither.
+ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.1@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
 
 FROM ${KEYCLOAK_IMAGE} AS builder
 

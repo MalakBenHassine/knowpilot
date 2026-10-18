@@ -43,3 +43,18 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  # The base images the Dockerfiles build FROM, which the ecosystem above does
+  # not see: it reads docker-compose.yml and nothing else. Without this entry
+  # nginx-unprivileged, node and the Keycloak distribution production is built
+  # from were never offered an update at all - while the development stack's
+  # Keycloak was. That is how the two halves of this project came to disagree
+  # about which version it runs, and why frontend/Dockerfile had to be bumped
+  # by hand after a CVE the release gate caught.
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+      - /infra/keycloak
+    schedule:
+      interval: weekly
