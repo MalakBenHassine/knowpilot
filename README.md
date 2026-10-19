@@ -15,6 +15,26 @@ deployed. Multi-architecture images, signed without a private key anywhere, and
 pulled by the target machine itself rather than pushed to it
 ([ADR-0023](docs/adr/0023-pull-based-deployment.md), [docs/deploy.md](docs/deploy.md)).
 
+## Contents
+
+[What this repository records](#what-this-repository-records) ·
+[How it fits together](#how-it-fits-together) ·
+[Features](#features) ·
+[Tech stack](#tech-stack)
+
+Running it: [services](#running-the-services) ·
+[backend](#running-the-backend) ·
+[tests](#running-the-tests) ·
+[evaluation](#evaluating-the-assistant) ·
+[worker](#running-the-ingestion-worker) ·
+[frontend](#running-the-frontend) ·
+[performance](#measuring-it)
+
+Shipping it: [checks](#quality-and-security-checks) ·
+[releasing](#releasing) ·
+[watching](#watching-it) ·
+[deploying](#deploying)
+
 ## What this repository records
 
 A RAG assistant that answers questions is the easy half. The harder half is what
@@ -49,6 +69,64 @@ it fails against the versions that shipped the bugs.
 **Twenty-three decisions are written down.** [`docs/adr/`](docs/adr/) says what
 was chosen, what was rejected and why - and, where it matters, what turned out to
 be wrong. ADR-0023 corrects two of its own stated consequences.
+
+## How it fits together
+
+```
+                         browser
+                            |
+                          https
+                            |
+      +---------------------v----------------------+
+      |                   Caddy                    |   the only container with
+      +-----+---------------+-----------------+----+   a port on the internet
+            |               |                 |
+          (SPA)          /api/*            /auth/*
+            |               |                 |
+      +-----v----+    +-----v-----+     +-----v----+
+      | frontend |    |    api    |     | Keycloak |
+      |  nginx   |    |  FastAPI  |     |   OIDC   |
+      +----------+    +-----+-----+     +----------+
+                            |
+                    +-------+--------------+
+                    |                      |
+            +-------v------+      +--------v--------+
+            |  PostgreSQL  |      |      Redis      |
+            |  + pgvector  |      | sessions + jobs |
+            +-------^------+      +--------^--------+
+                    |                      |
+                    +-------+--------------+
+                            |
+                    +-------+-------+
+                    |     worker    |
+                    |     (arq)     |
+                    +---------------+
+```
+
+Keycloak keeps its own database, isolated inside the same PostgreSQL instance;
+it is left out of the picture because a diagram that shows everything shows
+nothing.
+
+**One origin.** The SPA, the API and Keycloak all answer on the same domain, so
+the session cookie can be `__Host-` prefixed and there is no CORS to configure -
+there is nothing cross-origin. Keycloak's admin console and its master realm
+answer `404` at the edge; administration goes through `kcadm` inside the
+container.
+
+**The browser never holds a token.** The API is a Backend-for-Frontend: it
+completes the OIDC exchange, keeps the tokens in Redis, and hands the browser a
+session cookie. An XSS cannot steal what the page never had.
+
+**Two processes that fail independently.** The API answers questions; the worker
+parses and embeds uploads. They are separate because a thirty-page PDF used to
+hold the event loop away from everyone asking a question - and because the API
+can be perfectly healthy while the worker is dead and every upload rots behind a
+spinner. That is why Prometheus scrapes **both**.
+
+**Three one-shot jobs run before the pair starts**: `migrate` applies the schema,
+`model` downloads the 2.2 GB of embedding weights into a volume the API and the
+worker then mount read-only and offline, and `ca-export` publishes Caddy's local
+CA so the API can verify Keycloak over HTTPS on a private network.
 
 ## Features
 
@@ -113,7 +191,7 @@ uv run uvicorn app.main:app --reload --port 8000
 - Interactive docs at `/api/docs`, disabled when `KP_ENVIRONMENT=production`.
 
 The API contract lives in [docs/api/contract.md](docs/api/contract.md), and the
-reasoning behind the main technical choices in the **22 ADRs** under
+reasoning behind the main technical choices in the **23 ADRs** under
 [docs/adr/](docs/adr/README.md).
 
 ## Running the tests
