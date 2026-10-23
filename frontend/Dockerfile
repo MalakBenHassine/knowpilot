@@ -16,7 +16,7 @@
 # bundler and the linter are Rust programs), and musl builds of those are the
 # kind of thing that works until the day it does not. The size of this stage
 # is irrelevant - none of it ships.
-FROM node:24-slim AS builder
+FROM node:25-slim AS builder
 
 WORKDIR /app
 
